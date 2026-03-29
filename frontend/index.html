@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>IST University Voice Agent</title>
+	<style>
+		:root {
+			--bg: #eef3eb;
+			--panel: rgba(255, 255, 255, 0.86);
+			--ink: #102417;
+			--muted: #5e6f63;
+			--brand: #0b6b3c;
+			--brand-dark: #084628;
+			--danger: #a62d2d;
+			--line: rgba(16, 36, 23, 0.12);
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		body {
+			margin: 0;
+			min-height: 100vh;
+			font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+			background:
+				radial-gradient(circle at top, rgba(11, 107, 60, 0.18), transparent 30%),
+				linear-gradient(160deg, #f6faf4 0%, #e7efe7 100%);
+			color: var(--ink);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 24px;
+		}
+
+		.shell {
+			width: min(760px, 100%);
+			background: var(--panel);
+			backdrop-filter: blur(14px);
+			border: 1px solid var(--line);
+			border-radius: 28px;
+			box-shadow: 0 22px 70px rgba(8, 70, 40, 0.12);
+			overflow: hidden;
+		}
+
+		.hero {
+			padding: 28px 28px 18px;
+			background: linear-gradient(135deg, rgba(11, 107, 60, 0.96), rgba(5, 54, 32, 0.96));
+			color: #f6fff8;
+		}
+
+		.hero h1 {
+			margin: 0;
+			font-size: clamp(1.8rem, 4vw, 2.6rem);
+			line-height: 1.05;
+			letter-spacing: 0.03em;
+			text-transform: uppercase;
+		}
+
+		.hero p {
+			margin: 10px 0 0;
+			max-width: 52ch;
+			color: rgba(246, 255, 248, 0.82);
+		}
+
+		.content {
+			padding: 22px 24px 24px;
+			display: grid;
+			gap: 18px;
+		}
+
+		.panel {
+			border: 1px solid var(--line);
+			border-radius: 20px;
+			padding: 18px;
+			background: rgba(255, 255, 255, 0.8);
+		}
+
+		.metrics {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+			gap: 12px;
+		}
+
+		.metric-label {
+			font-size: 0.8rem;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: var(--muted);
+		}
+
+		.metric-value {
+			margin-top: 6px;
+			font-size: 1rem;
+			font-weight: 700;
+		}
+
+		.controls {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 12px;
+		}
+
+		button {
+			border: 0;
+			border-radius: 999px;
+			padding: 14px 20px;
+			font-size: 0.98rem;
+			font-weight: 700;
+			cursor: pointer;
+			transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+		}
+
+		button:hover:not(:disabled) {
+			transform: translateY(-1px);
+		}
+
+		button:disabled {
+			opacity: 0.45;
+			cursor: not-allowed;
+		}
+
+		.call-btn {
+			background: var(--brand);
+			color: white;
+			box-shadow: 0 12px 24px rgba(11, 107, 60, 0.22);
+		}
+
+		.end-btn {
+			background: #ffe9e9;
+			color: var(--danger);
+		}
+
+		.vad-pill {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			padding: 10px 14px;
+			border-radius: 999px;
+			background: rgba(16, 36, 23, 0.06);
+			font-weight: 600;
+		}
+
+		.vad-dot {
+			width: 12px;
+			height: 12px;
+			border-radius: 50%;
+			background: #b9c7bc;
+			transition: background 120ms ease, box-shadow 120ms ease;
+		}
+
+		.vad-dot.active {
+			background: #18b05c;
+			box-shadow: 0 0 0 8px rgba(24, 176, 92, 0.14);
+		}
+
+		.transcript-list {
+			display: grid;
+			gap: 12px;
+			max-height: 380px;
+			overflow: auto;
+		}
+
+		.message {
+			padding: 14px 16px;
+			border-radius: 16px;
+			line-height: 1.45;
+			font-size: 0.97rem;
+		}
+
+		.message.user {
+			background: #edf6ef;
+			border: 1px solid rgba(11, 107, 60, 0.12);
+		}
+
+		.message.bot {
+			background: #fff8eb;
+			border: 1px solid rgba(163, 113, 18, 0.12);
+		}
+
+		.message small {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 0.76rem;
+			letter-spacing: 0.06em;
+			text-transform: uppercase;
+			color: var(--muted);
+		}
+
+		@media (max-width: 640px) {
+			body {
+				padding: 14px;
+			}
+
+			.hero,
+			.content {
+				padding-left: 18px;
+				padding-right: 18px;
+			}
+		}
+	</style>
+</head>
+<body>
+	<div class="shell">
+		<section class="hero">
+			<h1>IST UNIVERSITY VOICE AGENT</h1>
+			<p>Start a live voice session for admissions and campus queries grounded in the IST knowledge base.</p>
+		</section>
+
+		<section class="content">
+			<div class="metrics">
+				<div class="panel">
+					<div class="metric-label">Call Status</div>
+					<div class="metric-value" id="status">Idle</div>
+				</div>
+				<div class="panel">
+					<div class="metric-label">Connection</div>
+					<div class="metric-value" id="connectionState">Disconnected</div>
+				</div>
+				<div class="panel">
+					<div class="metric-label">Voice Activity</div>
+					<div class="metric-value">
+						<span class="vad-pill"><span id="vadDot" class="vad-dot"></span><span id="vadText">Waiting</span></span>
+					</div>
+				</div>
+			</div>
+
+			<div class="panel controls">
+				<button id="dialBtn" class="call-btn">Dial a Call</button>
+				<button id="hangupBtn" class="end-btn" disabled>End Call</button>
+			</div>
+
+			<div class="panel">
+				<div class="metric-label">Conversation</div>
+				<div id="transcriptList" class="transcript-list"></div>
+			</div>
+		</section>
+	</div>
+
+	<script>
+		const statusEl = document.getElementById("status");
+		const connectionStateEl = document.getElementById("connectionState");
+		const vadDotEl = document.getElementById("vadDot");
+		const vadTextEl = document.getElementById("vadText");
+		const transcriptListEl = document.getElementById("transcriptList");
+		const dialBtn = document.getElementById("dialBtn");
+		const hangupBtn = document.getElementById("hangupBtn");
+
+		const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+		// Use window.location.host (includes port) so this works both in local dev
+		// (where fastapi runs on 8000) and on Render (where the path is just the hostname).
+		const wsHost = window.location.host || "127.0.0.1:8000";
+		const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+		const wsUrl = `${wsProtocol}://${wsHost}/ws`;
+
+		let ws = null;
+		let recognition = null;
+		let callActive = false;
+		let recognitionRunning = false;
+		let botSpeaking = false;
+		let micStream = null;
+		let audioContext = null;
+		let analyser = null;
+		let vadFrame = null;
+		let ttsQueue = [];
+		let streamTextBuffer = "";
+		let activeBotBodyEl = null;
+		let speechFrames = 0;
+		let silenceFrames = 0;
+		let noiseFloorRms = 0.01;
+		const SPEECH_START_FRAMES = 5;
+		const SPEECH_END_FRAMES = 12;
+		const NOISE_ADAPT_RATE = 0.06;
+		const MIN_RMS_GATE = 0.012;
+		const SPEECH_BAND_MIN_HZ = 170;
+		const SPEECH_BAND_MAX_HZ = 3400;
+		const SPEECH_RATIO_GATE = 0.58;
+
+		let lastStatusText = statusEl.innerText;
+		let lastConnectionText = connectionStateEl.innerText;
+		let lastVadActive = false;
+		let lastVadText = vadTextEl.innerText;
+
+		function setStatus(text) {
+			if (lastStatusText !== text) {
+				lastStatusText = text;
+				statusEl.innerText = text;
+			}
+		}
+
+		function setConnectionState(text) {
+			if (lastConnectionText !== text) {
+				lastConnectionText = text;
+				connectionStateEl.innerText = text;
+			}
+		}
+
+		if (!SpeechRecognition) {
+			setStatus("Speech recognition unsupported");
+			dialBtn.disabled = true;
+			appendMessage("bot", "This browser does not support speech recognition. Please use Chrome or Edge.");
+		} else {
+			recognition = new SpeechRecognition();
+			recognition.continuous = true;
+			recognition.interimResults = false;
+			recognition.lang = "en-US";
+
+			recognition.onstart = () => {
+				recognitionRunning = true;
+				setStatus("Listening");
+			};
+
+			recognition.onresult = (event) => {
+				const text = event.results[event.results.length - 1][0].transcript.trim();
+				if (!text) {
+					return;
+				}
+				// Barge-in: user spoke while agent was answering — cancel speech immediately
+				if (botSpeaking) {
+					stopBotSpeech();
+					setStatus("Listening");
+				}
+				appendMessage("user", text);
+				setStatus("Sending query");
+				if (ws && ws.readyState === WebSocket.OPEN) {
+					ws.send(text);
+				}
+			};
+
+			recognition.onerror = (event) => {
+				setStatus(`Speech recognition error: ${event.error}`);
+			};
+
+			recognition.onend = () => {
+				recognitionRunning = false;
+				// Only restart when bot is NOT speaking — VAD handles the barge-in interrupt
+				if (callActive && !botSpeaking) {
+					startRecognition();
+				} else if (!callActive) {
+					setStatus("Call ended");
+				}
+			};
+		}
+
+		function appendMessage(role, text) {
+			const message = document.createElement("div");
+			message.className = `message ${role}`;
+
+			const label = document.createElement("small");
+			label.innerText = role === "user" ? "Caller" : "IST Agent";
+
+			const body = document.createElement("div");
+			body.innerText = text;
+
+			message.appendChild(label);
+			message.appendChild(body);
+			transcriptListEl.appendChild(message);
+			transcriptListEl.scrollTop = transcriptListEl.scrollHeight;
+
+			return body;
+		}
+
+		function beginBotStreamMessage() {
+			activeBotBodyEl = appendMessage("bot", "");
+		}
+
+		function appendBotStreamDelta(text) {
+			if (!activeBotBodyEl) {
+				beginBotStreamMessage();
+			}
+			activeBotBodyEl.innerText += text;
+			transcriptListEl.scrollTop = transcriptListEl.scrollHeight;
+		}
+
+		function endBotStreamMessage() {
+			activeBotBodyEl = null;
+		}
+
+		function setVAD(active, text) {
+			if (lastVadActive !== active) {
+				lastVadActive = active;
+				vadDotEl.classList.toggle("active", active);
+			}
+			if (lastVadText !== text) {
+				lastVadText = text;
+				vadTextEl.innerText = text;
+			}
+		}
+
+		async function startVAD() {
+			if (micStream) {
+				return;
+			}
+
+			// echoCancellation removes bot TTS from the mic signal so VAD only sees the user's voice
+			micStream = await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+			});
+			audioContext = new AudioContext();
+			const source = audioContext.createMediaStreamSource(micStream);
+			analyser = audioContext.createAnalyser();
+			analyser.fftSize = 2048;
+			analyser.smoothingTimeConstant = 0.86;
+			source.connect(analyser);
+
+			const data = new Uint8Array(analyser.fftSize);
+			const freqData = new Uint8Array(analyser.frequencyBinCount);
+			const nyquist = audioContext.sampleRate / 2;
+			const lowBin = Math.max(1, Math.floor((SPEECH_BAND_MIN_HZ / nyquist) * analyser.frequencyBinCount));
+			const highBin = Math.min(analyser.frequencyBinCount - 1, Math.ceil((SPEECH_BAND_MAX_HZ / nyquist) * analyser.frequencyBinCount));
+
+			const tick = () => {
+				if (!analyser) {
+					return;
+				}
+
+				analyser.getByteTimeDomainData(data);
+				analyser.getByteFrequencyData(freqData);
+				let sum = 0;
+				for (let i = 0; i < data.length; i += 1) {
+					const value = (data[i] - 128) / 128;
+					sum += value * value;
+				}
+				const rms = Math.sqrt(sum / data.length);
+				let totalEnergy = 0;
+				let speechBandEnergy = 0;
+				for (let i = 1; i < freqData.length; i += 1) {
+					const energy = freqData[i];
+					totalEnergy += energy;
+					if (i >= lowBin && i <= highBin) {
+						speechBandEnergy += energy;
+					}
+				}
+				const speechRatio = totalEnergy > 0 ? speechBandEnergy / totalEnergy : 0;
+
+				const baseGate = Math.max(MIN_RMS_GATE, noiseFloorRms * 2.8);
+				const dynamicGate = botSpeaking ? baseGate * 1.25 : baseGate;
+				const isSpeechLike = rms > dynamicGate && speechRatio > SPEECH_RATIO_GATE;
+
+				if (isSpeechLike) {
+					speechFrames += 1;
+					silenceFrames = 0;
+				} else {
+					silenceFrames += 1;
+					speechFrames = 0;
+					const adaptRate = botSpeaking ? 0.01 : NOISE_ADAPT_RATE;
+					noiseFloorRms = (noiseFloorRms * (1 - adaptRate)) + (rms * adaptRate);
+				}
+
+				if (speechFrames >= SPEECH_START_FRAMES) {
+					setVAD(true, "Voice detected");
+
+					// Mid-answer barge-in trigger with robust speech gating.
+					if (botSpeaking && callActive) {
+						speechFrames = 0;
+						stopBotSpeech();
+						setStatus("Listening");
+						if (recognitionRunning) {
+							recognition.abort();
+						} else {
+							startRecognition();
+						}
+					}
+				}
+
+				if (silenceFrames >= SPEECH_END_FRAMES) {
+					if (callActive) {
+						setVAD(false, "Listening for speech");
+					} else {
+						setVAD(false, "Waiting");
+					}
+				}
+
+				vadFrame = requestAnimationFrame(tick);
+			};
+
+			speechFrames = 0;
+			silenceFrames = 0;
+			noiseFloorRms = 0.01;
+			setVAD(false, "Listening for speech");
+			vadFrame = requestAnimationFrame(tick);
+		}
+
+		function stopVAD() {
+			if (vadFrame) {
+				cancelAnimationFrame(vadFrame);
+				vadFrame = null;
+			}
+			if (micStream) {
+				micStream.getTracks().forEach((track) => track.stop());
+				micStream = null;
+			}
+			if (audioContext) {
+				audioContext.close();
+				audioContext = null;
+			}
+			analyser = null;
+			setVAD(false, "Waiting");
+		}
+
+		function startRecognition() {
+			// Guard botSpeaking: Chrome blocks recognition during TTS anyway; VAD handles interrupt
+			if (!recognition || recognitionRunning || !callActive || botSpeaking) {
+				return;
+			}
+			try {
+				recognition.start();
+			} catch (_error) {
+				// Browser can throw if start is called while already active.
+			}
+		}
+
+		function stopRecognition() {
+			if (!recognition || !recognitionRunning) {
+				return;
+			}
+			recognition.stop();
+		}
+
+		function stopBotSpeech() {
+			ttsQueue = [];
+			streamTextBuffer = "";
+			botSpeaking = false;
+			speechSynthesis.cancel();
+		}
+
+		function pumpSpeechQueue() {
+			if (!callActive) {
+				return;
+			}
+			if (botSpeaking || ttsQueue.length === 0) {
+				if (!botSpeaking && ttsQueue.length === 0) {
+					setStatus("Listening");
+					startRecognition();
+				}
+				return;
+			}
+
+			const chunk = ttsQueue.shift();
+			if (!chunk.trim()) {
+				pumpSpeechQueue();
+				return;
+			}
+
+			botSpeaking = true;
+			speechFrames = 0;
+			silenceFrames = 0;
+			stopRecognition();
+			setStatus("Speaking");
+
+			const utterance = new SpeechSynthesisUtterance(chunk);
+			utterance.onend = () => {
+				if (!botSpeaking) {
+					return;
+				}
+				botSpeaking = false;
+				pumpSpeechQueue();
+			};
+			utterance.onerror = () => {
+				botSpeaking = false;
+				pumpSpeechQueue();
+			};
+			speechSynthesis.speak(utterance);
+		}
+
+		function queueSpeech(text) {
+			if (!text || !text.trim()) {
+				return;
+			}
+			ttsQueue.push(text.trim());
+			pumpSpeechQueue();
+		}
+
+		function flushStreamText(force = false) {
+			if (!streamTextBuffer) {
+				return;
+			}
+
+			const sentenceRegex = /.+?[.!?](?:\s+|$)/g;
+			let match;
+			let consumed = 0;
+			while ((match = sentenceRegex.exec(streamTextBuffer)) !== null) {
+				const sentence = match[0].trim();
+				if (sentence) {
+					queueSpeech(sentence);
+				}
+				consumed = sentenceRegex.lastIndex;
+			}
+
+			if (consumed > 0) {
+				streamTextBuffer = streamTextBuffer.slice(consumed);
+			}
+
+			if (force && streamTextBuffer.trim()) {
+				queueSpeech(streamTextBuffer.trim());
+				streamTextBuffer = "";
+			}
+		}
+
+		function connectWebSocket() {
+			return new Promise((resolve, reject) => {
+				ws = new WebSocket(wsUrl);
+
+				ws.onopen = () => {
+					setConnectionState("Connected");
+					resolve();
+				};
+
+				ws.onmessage = (event) => {
+					let payload = null;
+					try {
+						payload = JSON.parse(event.data);
+					} catch (_error) {
+						payload = null;
+					}
+
+					if (!payload || !payload.type) {
+						appendMessage("bot", event.data);
+						queueSpeech(event.data);
+						return;
+					}
+
+					if (payload.type === "stream_start") {
+						streamTextBuffer = "";
+						beginBotStreamMessage();
+						return;
+					}
+
+					if (payload.type === "stream_delta") {
+						const delta = payload.text || "";
+						if (!delta) {
+							return;
+						}
+						appendBotStreamDelta(delta);
+						streamTextBuffer += delta;
+						flushStreamText(false);
+						return;
+					}
+
+					if (payload.type === "stream_end") {
+						flushStreamText(true);
+						endBotStreamMessage();
+					}
+				};
+
+				ws.onerror = () => {
+					setConnectionState("Error");
+					setStatus("WebSocket error");
+					reject(new Error("WebSocket error"));
+				};
+
+				ws.onclose = () => {
+					setConnectionState("Disconnected");
+					if (callActive) {
+						setStatus("Connection closed");
+						endCall();
+					}
+				};
+			});
+		}
+
+		async function startCall() {
+			if (callActive) {
+				return;
+			}
+
+			try {
+				callActive = true;
+				dialBtn.disabled = true;
+				hangupBtn.disabled = false;
+				setStatus("Starting call");
+				setConnectionState("Connecting");
+
+				await startVAD();
+				await connectWebSocket();
+			} catch (error) {
+				setStatus("Unable to start call");
+				setConnectionState("Disconnected");
+				callActive = false;
+				dialBtn.disabled = false;
+				hangupBtn.disabled = true;
+				stopVAD();
+			}
+		}
+
+		function endCall() {
+			callActive = false;
+			stopBotSpeech();
+			endBotStreamMessage();
+			stopRecognition();
+			stopVAD();
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.close();
+			}
+			ws = null;
+			setStatus("Idle");
+			setConnectionState("Disconnected");
+			dialBtn.disabled = false;
+			hangupBtn.disabled = true;
+		}
+
+		dialBtn.addEventListener("click", startCall);
+		hangupBtn.addEventListener("click", endCall);
+	</script>
+</body>
+</html>

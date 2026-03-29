@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Raw crawler output — not needed at runtime (KB.txt is used instead)
+data/texts.json
