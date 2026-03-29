@@ -267,6 +267,8 @@
 		let ttsQueue = [];
 		let streamTextBuffer = "";
 		let activeBotBodyEl = null;
+		let latestInterimTranscript = "";
+		let interimUpdatedAt = 0;
 		let lastRecognitionStartAt = 0;
 		let lastFinalTranscriptAt = 0;
 		let lastRecognitionRecoveryAt = 0;
@@ -282,6 +284,7 @@
 		const SPEECH_RATIO_GATE = 0.58;
 		const STALE_RECOGNITION_MS = 5200;
 		const RECOVERY_COOLDOWN_MS = 2600;
+		const INTERIM_COMMIT_MIN_AGE_MS = 450;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -329,6 +332,25 @@
 			}
 		}
 
+		function commitUserQuery(text) {
+			const cleanText = (text || "").trim();
+			if (!cleanText) {
+				return;
+			}
+			latestInterimTranscript = "";
+			interimUpdatedAt = 0;
+			lastFinalTranscriptAt = Date.now();
+			if (botSpeaking) {
+				stopBotSpeech();
+				setStatus("Listening");
+			}
+			appendMessage("user", cleanText);
+			setStatus("Sending query");
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.send(cleanText);
+			}
+		}
+
 		if (!SpeechRecognition) {
 			setStatus("Speech recognition unsupported");
 			dialBtn.disabled = true;
@@ -347,27 +369,22 @@
 
 			recognition.onresult = (event) => {
 				let text = "";
+				let interim = "";
 				for (let i = event.resultIndex; i < event.results.length; i += 1) {
 					const result = event.results[i];
 					if (result.isFinal) {
 						text += `${result[0].transcript} `;
+					} else {
+						interim += `${result[0].transcript} `;
 					}
 				}
+				latestInterimTranscript = interim.trim();
+				interimUpdatedAt = latestInterimTranscript ? Date.now() : 0;
 				text = text.trim();
 				if (!text) {
 					return;
 				}
-				lastFinalTranscriptAt = Date.now();
-				// Barge-in: user spoke while agent was answering — cancel speech immediately
-				if (botSpeaking) {
-					stopBotSpeech();
-					setStatus("Listening");
-				}
-				appendMessage("user", text);
-				setStatus("Sending query");
-				if (ws && ws.readyState === WebSocket.OPEN) {
-					ws.send(text);
-				}
+				commitUserQuery(text);
 			};
 
 			recognition.onerror = (event) => {
@@ -511,6 +528,16 @@
 				}
 
 				if (silenceFrames >= SPEECH_END_FRAMES) {
+					// Android Chrome can keep emitting interim tokens without ever finalizing;
+					// commit the latest stable interim phrase once VAD observes speech end.
+					if (
+						callActive &&
+						!botSpeaking &&
+						latestInterimTranscript &&
+						(Date.now() - interimUpdatedAt) > INTERIM_COMMIT_MIN_AGE_MS
+					) {
+						commitUserQuery(latestInterimTranscript);
+					}
 					if (callActive) {
 						setVAD(false, "Listening for speech");
 					} else {
@@ -713,6 +740,8 @@
 
 			try {
 				callActive = true;
+				latestInterimTranscript = "";
+				interimUpdatedAt = 0;
 				lastRecognitionStartAt = 0;
 				lastFinalTranscriptAt = 0;
 				lastRecognitionRecoveryAt = 0;
@@ -735,6 +764,8 @@
 
 		function endCall() {
 			callActive = false;
+			latestInterimTranscript = "";
+			interimUpdatedAt = 0;
 			lastRecognitionStartAt = 0;
 			lastFinalTranscriptAt = 0;
 			lastRecognitionRecoveryAt = 0;
