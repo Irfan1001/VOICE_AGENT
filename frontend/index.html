@@ -248,6 +248,7 @@
 		const hangupBtn = document.getElementById("hangupBtn");
 
 		const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+		const isMobileBrowser = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent || "");
 		// Use window.location.host (includes port) so this works both in local dev
 		// (where fastapi runs on 8000) and on Render (where the path is just the hostname).
 		const wsHost = window.location.host || "127.0.0.1:8000";
@@ -266,6 +267,9 @@
 		let ttsQueue = [];
 		let streamTextBuffer = "";
 		let activeBotBodyEl = null;
+		let lastRecognitionStartAt = 0;
+		let lastFinalTranscriptAt = 0;
+		let lastRecognitionRecoveryAt = 0;
 		let speechFrames = 0;
 		let silenceFrames = 0;
 		let noiseFloorRms = 0.01;
@@ -276,6 +280,8 @@
 		const SPEECH_BAND_MIN_HZ = 170;
 		const SPEECH_BAND_MAX_HZ = 3400;
 		const SPEECH_RATIO_GATE = 0.58;
+		const STALE_RECOGNITION_MS = 5200;
+		const RECOVERY_COOLDOWN_MS = 2600;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -296,6 +302,33 @@
 			}
 		}
 
+		function recoverRecognitionIfStalled() {
+			if (!isMobileBrowser) {
+				return;
+			}
+			if (!callActive || botSpeaking || !recognition || !recognitionRunning) {
+				return;
+			}
+
+			const now = Date.now();
+			const referenceTs = lastFinalTranscriptAt || lastRecognitionStartAt || now;
+			const idleMs = now - referenceTs;
+			if (idleMs < STALE_RECOGNITION_MS) {
+				return;
+			}
+			if ((now - lastRecognitionRecoveryAt) < RECOVERY_COOLDOWN_MS) {
+				return;
+			}
+
+			lastRecognitionRecoveryAt = now;
+			setStatus("Recovering mic");
+			try {
+				recognition.abort();
+			} catch (_error) {
+				// Ignore abort races; onend/start cycle will recover.
+			}
+		}
+
 		if (!SpeechRecognition) {
 			setStatus("Speech recognition unsupported");
 			dialBtn.disabled = true;
@@ -308,6 +341,7 @@
 
 			recognition.onstart = () => {
 				recognitionRunning = true;
+				lastRecognitionStartAt = Date.now();
 				setStatus("Listening");
 			};
 
@@ -323,6 +357,7 @@
 				if (!text) {
 					return;
 				}
+				lastFinalTranscriptAt = Date.now();
 				// Barge-in: user spoke while agent was answering — cancel speech immediately
 				if (botSpeaking) {
 					stopBotSpeech();
@@ -457,6 +492,10 @@
 
 				if (speechFrames >= SPEECH_START_FRAMES) {
 					setVAD(true, "Voice detected");
+					recoverRecognitionIfStalled();
+					if (callActive && !botSpeaking && !recognitionRunning) {
+						startRecognition();
+					}
 
 					// Mid-answer barge-in trigger with robust speech gating.
 					if (botSpeaking && callActive) {
@@ -674,6 +713,9 @@
 
 			try {
 				callActive = true;
+				lastRecognitionStartAt = 0;
+				lastFinalTranscriptAt = 0;
+				lastRecognitionRecoveryAt = 0;
 				dialBtn.disabled = true;
 				hangupBtn.disabled = false;
 				setStatus("Starting call");
@@ -693,6 +735,9 @@
 
 		function endCall() {
 			callActive = false;
+			lastRecognitionStartAt = 0;
+			lastFinalTranscriptAt = 0;
+			lastRecognitionRecoveryAt = 0;
 			stopBotSpeech();
 			endBotStreamMessage();
 			stopRecognition();
