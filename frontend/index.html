@@ -248,6 +248,7 @@
 		const hangupBtn = document.getElementById("hangupBtn");
 
 		const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+		const isMobileBrowser = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent || "");
 		// Use window.location.host (includes port) so this works both in local dev
 		// (where fastapi runs on 8000) and on Render (where the path is just the hostname).
 		const wsHost = window.location.host || "127.0.0.1:8000";
@@ -302,8 +303,9 @@
 			appendMessage("bot", "This browser does not support speech recognition. Please use Chrome or Edge.");
 		} else {
 			recognition = new SpeechRecognition();
-			recognition.continuous = true;
-			recognition.interimResults = false;
+			// Mobile browsers are more reliable with non-continuous recognition sessions.
+			recognition.continuous = !isMobileBrowser;
+			recognition.interimResults = true;
 			recognition.lang = "en-US";
 
 			recognition.onstart = () => {
@@ -312,7 +314,14 @@
 			};
 
 			recognition.onresult = (event) => {
-				const text = event.results[event.results.length - 1][0].transcript.trim();
+				let text = "";
+				for (let i = event.resultIndex; i < event.results.length; i += 1) {
+					const result = event.results[i];
+					if (result.isFinal) {
+						text += `${result[0].transcript} `;
+					}
+				}
+				text = text.trim();
 				if (!text) {
 					return;
 				}
@@ -389,6 +398,13 @@
 		}
 
 		async function startVAD() {
+			// Mobile compatibility: avoid opening a parallel mic stream for VAD,
+			// because some mobile browsers cannot share mic access with SpeechRecognition.
+			if (isMobileBrowser) {
+				setVAD(false, "Mobile compatibility mode");
+				return;
+			}
+
 			if (micStream) {
 				return;
 			}
