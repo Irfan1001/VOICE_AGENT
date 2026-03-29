@@ -249,8 +249,7 @@
 
 		const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 		const isMobileBrowser = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent || "");
-		// Use window.location.host (includes port) so this works both in local dev
-		// (where fastapi runs on 8000) and on Render (where the path is just the hostname).
+		const useMediaRecorderSTT = isMobileBrowser;
 		const wsHost = window.location.host || "127.0.0.1:8000";
 		const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
 		const wsUrl = `${wsProtocol}://${wsHost}/ws`;
@@ -264,6 +263,13 @@
 		let audioContext = null;
 		let analyser = null;
 		let vadFrame = null;
+
+		let mediaRecorder = null;
+		let recorderChunks = [];
+		let mobileRecording = false;
+		let mobileRecordStartedAt = 0;
+		let mobileRecordTimeout = null;
+
 		let ttsQueue = [];
 		let streamTextBuffer = "";
 		let activeBotBodyEl = null;
@@ -272,9 +278,11 @@
 		let lastRecognitionStartAt = 0;
 		let lastFinalTranscriptAt = 0;
 		let lastRecognitionRecoveryAt = 0;
+
 		let speechFrames = 0;
 		let silenceFrames = 0;
 		let noiseFloorRms = 0.01;
+
 		const SPEECH_START_FRAMES = 5;
 		const SPEECH_END_FRAMES = 12;
 		const NOISE_ADAPT_RATE = 0.06;
@@ -282,9 +290,12 @@
 		const SPEECH_BAND_MIN_HZ = 170;
 		const SPEECH_BAND_MAX_HZ = 3400;
 		const SPEECH_RATIO_GATE = 0.58;
+
 		const STALE_RECOGNITION_MS = 5200;
 		const RECOVERY_COOLDOWN_MS = 2600;
 		const INTERIM_COMMIT_MIN_AGE_MS = 450;
+		const MOBILE_MIN_RECORD_MS = 700;
+		const MOBILE_MAX_RECORD_MS = 7500;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -303,103 +314,6 @@
 				lastConnectionText = text;
 				connectionStateEl.innerText = text;
 			}
-		}
-
-		function recoverRecognitionIfStalled() {
-			if (!isMobileBrowser) {
-				return;
-			}
-			if (!callActive || botSpeaking || !recognition || !recognitionRunning) {
-				return;
-			}
-
-			const now = Date.now();
-			const referenceTs = lastFinalTranscriptAt || lastRecognitionStartAt || now;
-			const idleMs = now - referenceTs;
-			if (idleMs < STALE_RECOGNITION_MS) {
-				return;
-			}
-			if ((now - lastRecognitionRecoveryAt) < RECOVERY_COOLDOWN_MS) {
-				return;
-			}
-
-			lastRecognitionRecoveryAt = now;
-			setStatus("Recovering mic");
-			try {
-				recognition.abort();
-			} catch (_error) {
-				// Ignore abort races; onend/start cycle will recover.
-			}
-		}
-
-		function commitUserQuery(text) {
-			const cleanText = (text || "").trim();
-			if (!cleanText) {
-				return;
-			}
-			latestInterimTranscript = "";
-			interimUpdatedAt = 0;
-			lastFinalTranscriptAt = Date.now();
-			if (botSpeaking) {
-				stopBotSpeech();
-				setStatus("Listening");
-			}
-			appendMessage("user", cleanText);
-			setStatus("Sending query");
-			if (ws && ws.readyState === WebSocket.OPEN) {
-				ws.send(cleanText);
-			}
-		}
-
-		if (!SpeechRecognition) {
-			setStatus("Speech recognition unsupported");
-			dialBtn.disabled = true;
-			appendMessage("bot", "This browser does not support speech recognition. Please use Chrome or Edge.");
-		} else {
-			recognition = new SpeechRecognition();
-			recognition.continuous = true;
-			recognition.interimResults = true;
-			recognition.lang = "en-US";
-
-			recognition.onstart = () => {
-				recognitionRunning = true;
-				lastRecognitionStartAt = Date.now();
-				setStatus("Listening");
-			};
-
-			recognition.onresult = (event) => {
-				let text = "";
-				let interim = "";
-				for (let i = event.resultIndex; i < event.results.length; i += 1) {
-					const result = event.results[i];
-					if (result.isFinal) {
-						text += `${result[0].transcript} `;
-					} else {
-						interim += `${result[0].transcript} `;
-					}
-				}
-				latestInterimTranscript = interim.trim();
-				interimUpdatedAt = latestInterimTranscript ? Date.now() : 0;
-				text = text.trim();
-				if (!text) {
-					return;
-				}
-				commitUserQuery(text);
-			};
-
-			recognition.onerror = (event) => {
-				setStatus(`Speech recognition error: ${event.error}`);
-			};
-
-			recognition.onend = () => {
-				recognitionRunning = false;
-				// Only restart when bot is NOT speaking — VAD handles the barge-in interrupt
-				if (callActive && !botSpeaking) {
-					startRecognition();
-				} else if (!callActive) {
-					setStatus("Call ended");
-				}
-			};
 		}
 
 		function appendMessage(role, text) {
@@ -447,21 +361,217 @@
 			}
 		}
 
+		function commitUserQuery(text) {
+			const cleanText = (text || "").trim();
+			if (!cleanText) {
+				setStatus("Listening");
+				return;
+			}
+
+			latestInterimTranscript = "";
+			interimUpdatedAt = 0;
+			lastFinalTranscriptAt = Date.now();
+
+			if (botSpeaking) {
+				stopBotSpeech();
+				setStatus("Listening");
+			}
+
+			appendMessage("user", cleanText);
+			setStatus("Sending query");
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.send(cleanText);
+			}
+		}
+
+		function setupMediaRecorder() {
+			if (!useMediaRecorderSTT || !micStream || mediaRecorder || typeof MediaRecorder === "undefined") {
+				return;
+			}
+
+			const preferredType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+				? { mimeType: "audio/webm;codecs=opus" }
+				: undefined;
+			mediaRecorder = preferredType ? new MediaRecorder(micStream, preferredType) : new MediaRecorder(micStream);
+
+			mediaRecorder.ondataavailable = (event) => {
+				if (event.data && event.data.size > 0) {
+					recorderChunks.push(event.data);
+				}
+			};
+
+			mediaRecorder.onstop = async () => {
+				if (!callActive) {
+					recorderChunks = [];
+					return;
+				}
+
+				const blob = new Blob(recorderChunks, { type: "audio/webm" });
+				recorderChunks = [];
+				if (blob.size < 1500) {
+					setStatus("Listening");
+					return;
+				}
+
+				try {
+					setStatus("Transcribing");
+					const formData = new FormData();
+					formData.append("audio", blob, "utterance.webm");
+					const response = await fetch("/transcribe", { method: "POST", body: formData });
+					if (!response.ok) {
+						throw new Error(`HTTP ${response.status}`);
+					}
+					const payload = await response.json();
+					const text = (payload && payload.text) ? String(payload.text).trim() : "";
+					commitUserQuery(text);
+				} catch (_error) {
+					setStatus("Listening");
+				}
+			};
+		}
+
+		function startMobileRecording() {
+			if (!useMediaRecorderSTT || !callActive || botSpeaking || mobileRecording || !mediaRecorder) {
+				return;
+			}
+
+			recorderChunks = [];
+			mobileRecording = true;
+			mobileRecordStartedAt = Date.now();
+			setStatus("Listening");
+
+			try {
+				mediaRecorder.start();
+			} catch (_error) {
+				mobileRecording = false;
+				return;
+			}
+
+			if (mobileRecordTimeout) {
+				clearTimeout(mobileRecordTimeout);
+			}
+			mobileRecordTimeout = setTimeout(() => {
+				stopMobileRecording(true);
+			}, MOBILE_MAX_RECORD_MS);
+		}
+
+		function stopMobileRecording(force = false) {
+			if (!useMediaRecorderSTT || !mobileRecording || !mediaRecorder) {
+				return;
+			}
+
+			if (!force) {
+				const elapsed = Date.now() - mobileRecordStartedAt;
+				if (elapsed < MOBILE_MIN_RECORD_MS) {
+					return;
+				}
+			}
+
+			mobileRecording = false;
+			mobileRecordStartedAt = 0;
+			if (mobileRecordTimeout) {
+				clearTimeout(mobileRecordTimeout);
+				mobileRecordTimeout = null;
+			}
+
+			try {
+				mediaRecorder.stop();
+			} catch (_error) {
+				// Ignore races.
+			}
+		}
+
+		function recoverRecognitionIfStalled() {
+			if (useMediaRecorderSTT || !callActive || botSpeaking || !recognition || !recognitionRunning) {
+				return;
+			}
+
+			const now = Date.now();
+			const referenceTs = lastFinalTranscriptAt || lastRecognitionStartAt || now;
+			const idleMs = now - referenceTs;
+			if (idleMs < STALE_RECOGNITION_MS) {
+				return;
+			}
+			if ((now - lastRecognitionRecoveryAt) < RECOVERY_COOLDOWN_MS) {
+				return;
+			}
+
+			lastRecognitionRecoveryAt = now;
+			setStatus("Recovering mic");
+			try {
+				recognition.abort();
+			} catch (_error) {
+				// Ignore abort races.
+			}
+		}
+
+		if (useMediaRecorderSTT && typeof MediaRecorder === "undefined") {
+			setStatus("Recorder unsupported");
+			dialBtn.disabled = true;
+			appendMessage("bot", "This mobile browser does not support audio recorder capture.");
+		} else if (!SpeechRecognition && !useMediaRecorderSTT) {
+			setStatus("Speech recognition unsupported");
+			dialBtn.disabled = true;
+			appendMessage("bot", "This browser does not support speech recognition. Please use Chrome or Edge.");
+		} else if (!useMediaRecorderSTT) {
+			recognition = new SpeechRecognition();
+			recognition.continuous = true;
+			recognition.interimResults = true;
+			recognition.lang = "en-US";
+
+			recognition.onstart = () => {
+				recognitionRunning = true;
+				lastRecognitionStartAt = Date.now();
+				setStatus("Listening");
+			};
+
+			recognition.onresult = (event) => {
+				let text = "";
+				let interim = "";
+				for (let i = event.resultIndex; i < event.results.length; i += 1) {
+					const result = event.results[i];
+					if (result.isFinal) {
+						text += `${result[0].transcript} `;
+					} else {
+						interim += `${result[0].transcript} `;
+					}
+				}
+				latestInterimTranscript = interim.trim();
+				interimUpdatedAt = latestInterimTranscript ? Date.now() : 0;
+				commitUserQuery(text);
+			};
+
+			recognition.onerror = (event) => {
+				setStatus(`Speech recognition error: ${event.error}`);
+			};
+
+			recognition.onend = () => {
+				recognitionRunning = false;
+				if (callActive && !botSpeaking) {
+					startRecognition();
+				} else if (!callActive) {
+					setStatus("Call ended");
+				}
+			};
+		}
+
 		async function startVAD() {
 			if (micStream) {
 				return;
 			}
 
-			// echoCancellation removes bot TTS from the mic signal so VAD only sees the user's voice
 			micStream = await navigator.mediaDevices.getUserMedia({
 				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
 			});
+
 			audioContext = new AudioContext();
 			const source = audioContext.createMediaStreamSource(micStream);
 			analyser = audioContext.createAnalyser();
 			analyser.fftSize = 2048;
 			analyser.smoothingTimeConstant = 0.86;
 			source.connect(analyser);
+
+			setupMediaRecorder();
 
 			const data = new Uint8Array(analyser.fftSize);
 			const freqData = new Uint8Array(analyser.frequencyBinCount);
@@ -476,12 +586,14 @@
 
 				analyser.getByteTimeDomainData(data);
 				analyser.getByteFrequencyData(freqData);
+
 				let sum = 0;
 				for (let i = 0; i < data.length; i += 1) {
 					const value = (data[i] - 128) / 128;
 					sum += value * value;
 				}
 				const rms = Math.sqrt(sum / data.length);
+
 				let totalEnergy = 0;
 				let speechBandEnergy = 0;
 				for (let i = 1; i < freqData.length; i += 1) {
@@ -509,17 +621,25 @@
 
 				if (speechFrames >= SPEECH_START_FRAMES) {
 					setVAD(true, "Voice detected");
-					recoverRecognitionIfStalled();
-					if (callActive && !botSpeaking && !recognitionRunning) {
-						startRecognition();
+
+					if (useMediaRecorderSTT) {
+						if (callActive && !botSpeaking) {
+							startMobileRecording();
+						}
+					} else {
+						recoverRecognitionIfStalled();
+						if (callActive && !botSpeaking && !recognitionRunning) {
+							startRecognition();
+						}
 					}
 
-					// Mid-answer barge-in trigger with robust speech gating.
 					if (botSpeaking && callActive) {
 						speechFrames = 0;
 						stopBotSpeech();
 						setStatus("Listening");
-						if (recognitionRunning) {
+						if (useMediaRecorderSTT) {
+							startMobileRecording();
+						} else if (recognitionRunning) {
 							recognition.abort();
 						} else {
 							startRecognition();
@@ -528,16 +648,14 @@
 				}
 
 				if (silenceFrames >= SPEECH_END_FRAMES) {
-					// Android Chrome can keep emitting interim tokens without ever finalizing;
-					// commit the latest stable interim phrase once VAD observes speech end.
-					if (
-						callActive &&
-						!botSpeaking &&
-						latestInterimTranscript &&
-						(Date.now() - interimUpdatedAt) > INTERIM_COMMIT_MIN_AGE_MS
-					) {
+					if (useMediaRecorderSTT && callActive && !botSpeaking && mobileRecording) {
+						stopMobileRecording(false);
+					}
+
+					if (!useMediaRecorderSTT && callActive && !botSpeaking && latestInterimTranscript && (Date.now() - interimUpdatedAt) > INTERIM_COMMIT_MIN_AGE_MS) {
 						commitUserQuery(latestInterimTranscript);
 					}
+
 					if (callActive) {
 						setVAD(false, "Listening for speech");
 					} else {
@@ -560,6 +678,15 @@
 				cancelAnimationFrame(vadFrame);
 				vadFrame = null;
 			}
+			if (mobileRecordTimeout) {
+				clearTimeout(mobileRecordTimeout);
+				mobileRecordTimeout = null;
+			}
+			mobileRecording = false;
+			mobileRecordStartedAt = 0;
+			recorderChunks = [];
+			mediaRecorder = null;
+
 			if (micStream) {
 				micStream.getTracks().forEach((track) => track.stop());
 				micStream = null;
@@ -573,25 +700,27 @@
 		}
 
 		function startRecognition() {
-			// Guard botSpeaking: Chrome blocks recognition during TTS anyway; VAD handles interrupt
-			if (!recognition || recognitionRunning || !callActive || botSpeaking) {
+			if (useMediaRecorderSTT || !recognition || recognitionRunning || !callActive || botSpeaking) {
 				return;
 			}
 			try {
 				recognition.start();
 			} catch (_error) {
-				// Browser can throw if start is called while already active.
+				// Ignore start races.
 			}
 		}
 
 		function stopRecognition() {
-			if (!recognition || !recognitionRunning) {
+			if (useMediaRecorderSTT || !recognition || !recognitionRunning) {
 				return;
 			}
 			recognition.stop();
 		}
 
 		function stopBotSpeech() {
+			if (useMediaRecorderSTT) {
+				stopMobileRecording(true);
+			}
 			ttsQueue = [];
 			streamTextBuffer = "";
 			botSpeaking = false;
@@ -605,7 +734,9 @@
 			if (botSpeaking || ttsQueue.length === 0) {
 				if (!botSpeaking && ttsQueue.length === 0) {
 					setStatus("Listening");
-					startRecognition();
+					if (!useMediaRecorderSTT) {
+						startRecognition();
+					}
 				}
 				return;
 			}
@@ -752,7 +883,7 @@
 
 				await startVAD();
 				await connectWebSocket();
-			} catch (error) {
+			} catch (_error) {
 				setStatus("Unable to start call");
 				setConnectionState("Disconnected");
 				callActive = false;
@@ -769,6 +900,7 @@
 			lastRecognitionStartAt = 0;
 			lastFinalTranscriptAt = 0;
 			lastRecognitionRecoveryAt = 0;
+			stopMobileRecording(true);
 			stopBotSpeech();
 			endBotStreamMessage();
 			stopRecognition();

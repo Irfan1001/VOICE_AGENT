@@ -1,8 +1,9 @@
 import uuid
 import json
+import io
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -44,6 +45,27 @@ def save_message(session_id, role, content):
 @app.get("/health")
 def health():
 	return {"status": "ok"}
+
+
+@app.post("/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+	data = await audio.read()
+	if not data:
+		raise HTTPException(status_code=400, detail="Empty audio payload")
+
+	buffer = io.BytesIO(data)
+	buffer.name = audio.filename or "utterance.webm"
+
+	try:
+		result = client.audio.transcriptions.create(
+			model="gpt-4o-mini-transcribe",
+			file=buffer,
+		)
+	except Exception as exc:
+		raise HTTPException(status_code=502, detail=f"Transcription failed: {exc}") from exc
+
+	text = (getattr(result, "text", "") or "").strip()
+	return {"text": text}
 
 
 @app.websocket("/ws")

@@ -4,3 +4,4 @@ faiss-cpu
 openai
 numpy
 python-dotenv
+python-multipart
