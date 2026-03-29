@@ -269,6 +269,7 @@
 		let mobileRecording = false;
 		let mobileRecordStartedAt = 0;
 		let mobileRecordTimeout = null;
+		let lastSpeechDetectedAt = 0;
 
 		let ttsQueue = [];
 		let streamTextBuffer = "";
@@ -294,8 +295,9 @@
 		const STALE_RECOGNITION_MS = 5200;
 		const RECOVERY_COOLDOWN_MS = 2600;
 		const INTERIM_COMMIT_MIN_AGE_MS = 450;
-		const MOBILE_MIN_RECORD_MS = 700;
-		const MOBILE_MAX_RECORD_MS = 7500;
+		const MOBILE_MIN_RECORD_MS = 1200;
+		const MOBILE_MAX_RECORD_MS = 12000;
+		const MOBILE_SILENCE_COMMIT_MS = 950;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -438,6 +440,7 @@
 			recorderChunks = [];
 			mobileRecording = true;
 			mobileRecordStartedAt = Date.now();
+			lastSpeechDetectedAt = mobileRecordStartedAt;
 			setStatus("Listening");
 
 			try {
@@ -465,10 +468,15 @@
 				if (elapsed < MOBILE_MIN_RECORD_MS) {
 					return;
 				}
+				const silenceElapsed = Date.now() - lastSpeechDetectedAt;
+				if (silenceElapsed < MOBILE_SILENCE_COMMIT_MS) {
+					return;
+				}
 			}
 
 			mobileRecording = false;
 			mobileRecordStartedAt = 0;
+			lastSpeechDetectedAt = 0;
 			if (mobileRecordTimeout) {
 				clearTimeout(mobileRecordTimeout);
 				mobileRecordTimeout = null;
@@ -612,6 +620,7 @@
 				if (isSpeechLike) {
 					speechFrames += 1;
 					silenceFrames = 0;
+					lastSpeechDetectedAt = Date.now();
 				} else {
 					silenceFrames += 1;
 					speechFrames = 0;
@@ -684,6 +693,7 @@
 			}
 			mobileRecording = false;
 			mobileRecordStartedAt = 0;
+			lastSpeechDetectedAt = 0;
 			recorderChunks = [];
 			mediaRecorder = null;
 
