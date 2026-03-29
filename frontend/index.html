@@ -298,8 +298,8 @@
 		const INTERIM_COMMIT_MIN_AGE_MS = 450;
 		const MOBILE_MIN_RECORD_MS = 1200;
 		const MOBILE_MAX_RECORD_MS = 12000;
-		const MOBILE_SILENCE_COMMIT_MS = 1400;
-		const MOBILE_SPEECH_HOLD_MS = 160;
+		const MOBILE_SILENCE_COMMIT_MS = 850;
+		const MOBILE_SPEECH_HOLD_MS = 180;
 		const MOBILE_RMS_GATE_MULTIPLIER = 1.12;
 		const MOBILE_SPEECH_RATIO_GATE = 0.54;
 		const MOBILE_START_FRAMES = 8;
@@ -633,7 +633,9 @@
 				if (speechDetected) {
 					speechFrames += 1;
 					silenceFrames = 0;
-					lastSpeechDetectedAt = Date.now();
+					if (!useMediaRecorderSTT || mobileSpeechLikeNow) {
+						lastSpeechDetectedAt = Date.now();
+					}
 					mobileSilenceStartedAt = 0;
 				} else {
 					silenceFrames += 1;
