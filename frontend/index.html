@@ -299,9 +299,11 @@
 		const MOBILE_MIN_RECORD_MS = 1200;
 		const MOBILE_MAX_RECORD_MS = 12000;
 		const MOBILE_SILENCE_COMMIT_MS = 1400;
-		const MOBILE_SPEECH_HOLD_MS = 450;
-		const MOBILE_RMS_GATE_MULTIPLIER = 0.72;
-		const MOBILE_SPEECH_RATIO_GATE = 0.42;
+		const MOBILE_SPEECH_HOLD_MS = 160;
+		const MOBILE_RMS_GATE_MULTIPLIER = 1.12;
+		const MOBILE_SPEECH_RATIO_GATE = 0.54;
+		const MOBILE_START_FRAMES = 8;
+		const MOBILE_BARGE_IN_FRAMES = 14;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -623,8 +625,9 @@
 				const dynamicGate = botSpeaking ? baseGate * 1.25 : baseGate;
 				const isSpeechLike = rms > dynamicGate && speechRatio > SPEECH_RATIO_GATE;
 				const mobileGate = dynamicGate * MOBILE_RMS_GATE_MULTIPLIER;
-				const mobileSpeechLikeNow = rms > mobileGate && speechRatio > MOBILE_SPEECH_RATIO_GATE;
-				const holdSpeech = useMediaRecorderSTT && (Date.now() - lastSpeechDetectedAt) <= MOBILE_SPEECH_HOLD_MS;
+				const mobileRatioGate = botSpeaking ? Math.max(0.62, MOBILE_SPEECH_RATIO_GATE) : MOBILE_SPEECH_RATIO_GATE;
+				const mobileSpeechLikeNow = rms > mobileGate && speechRatio > mobileRatioGate;
+				const holdSpeech = useMediaRecorderSTT && mobileRecording && (Date.now() - lastSpeechDetectedAt) <= MOBILE_SPEECH_HOLD_MS;
 				const speechDetected = useMediaRecorderSTT ? (mobileSpeechLikeNow || holdSpeech) : isSpeechLike;
 
 				if (speechDetected) {
@@ -642,8 +645,10 @@
 					}
 				}
 
-				if (speechFrames >= SPEECH_START_FRAMES) {
-					setVAD(true, "Voice detected");
+				const startFramesNeeded = useMediaRecorderSTT ? MOBILE_START_FRAMES : SPEECH_START_FRAMES;
+				if (speechFrames >= startFramesNeeded) {
+					const shouldShowVoice = !useMediaRecorderSTT || mobileSpeechLikeNow;
+					setVAD(shouldShowVoice, shouldShowVoice ? "Voice detected" : "Listening for speech");
 
 					if (useMediaRecorderSTT) {
 						if (callActive && !botSpeaking) {
@@ -656,7 +661,8 @@
 						}
 					}
 
-					if (botSpeaking && callActive) {
+					const bargeInFramesNeeded = useMediaRecorderSTT ? MOBILE_BARGE_IN_FRAMES : SPEECH_START_FRAMES;
+					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded) {
 						speechFrames = 0;
 						stopBotSpeech();
 						setStatus("Listening");
