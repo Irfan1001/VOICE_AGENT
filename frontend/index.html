@@ -270,6 +270,7 @@
 		let mobileRecordStartedAt = 0;
 		let mobileRecordTimeout = null;
 		let lastSpeechDetectedAt = 0;
+		let mobileSilenceStartedAt = 0;
 
 		let ttsQueue = [];
 		let streamTextBuffer = "";
@@ -297,7 +298,10 @@
 		const INTERIM_COMMIT_MIN_AGE_MS = 450;
 		const MOBILE_MIN_RECORD_MS = 1200;
 		const MOBILE_MAX_RECORD_MS = 12000;
-		const MOBILE_SILENCE_COMMIT_MS = 950;
+		const MOBILE_SILENCE_COMMIT_MS = 1400;
+		const MOBILE_SPEECH_HOLD_MS = 450;
+		const MOBILE_RMS_GATE_MULTIPLIER = 0.72;
+		const MOBILE_SPEECH_RATIO_GATE = 0.42;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -441,6 +445,7 @@
 			mobileRecording = true;
 			mobileRecordStartedAt = Date.now();
 			lastSpeechDetectedAt = mobileRecordStartedAt;
+			mobileSilenceStartedAt = 0;
 			setStatus("Listening");
 
 			try {
@@ -468,7 +473,7 @@
 				if (elapsed < MOBILE_MIN_RECORD_MS) {
 					return;
 				}
-				const silenceElapsed = Date.now() - lastSpeechDetectedAt;
+				const silenceElapsed = mobileSilenceStartedAt ? (Date.now() - mobileSilenceStartedAt) : 0;
 				if (silenceElapsed < MOBILE_SILENCE_COMMIT_MS) {
 					return;
 				}
@@ -477,6 +482,7 @@
 			mobileRecording = false;
 			mobileRecordStartedAt = 0;
 			lastSpeechDetectedAt = 0;
+			mobileSilenceStartedAt = 0;
 			if (mobileRecordTimeout) {
 				clearTimeout(mobileRecordTimeout);
 				mobileRecordTimeout = null;
@@ -616,16 +622,24 @@
 				const baseGate = Math.max(MIN_RMS_GATE, noiseFloorRms * 2.8);
 				const dynamicGate = botSpeaking ? baseGate * 1.25 : baseGate;
 				const isSpeechLike = rms > dynamicGate && speechRatio > SPEECH_RATIO_GATE;
+				const mobileGate = dynamicGate * MOBILE_RMS_GATE_MULTIPLIER;
+				const mobileSpeechLikeNow = rms > mobileGate && speechRatio > MOBILE_SPEECH_RATIO_GATE;
+				const holdSpeech = useMediaRecorderSTT && (Date.now() - lastSpeechDetectedAt) <= MOBILE_SPEECH_HOLD_MS;
+				const speechDetected = useMediaRecorderSTT ? (mobileSpeechLikeNow || holdSpeech) : isSpeechLike;
 
-				if (isSpeechLike) {
+				if (speechDetected) {
 					speechFrames += 1;
 					silenceFrames = 0;
 					lastSpeechDetectedAt = Date.now();
+					mobileSilenceStartedAt = 0;
 				} else {
 					silenceFrames += 1;
 					speechFrames = 0;
 					const adaptRate = botSpeaking ? 0.01 : NOISE_ADAPT_RATE;
 					noiseFloorRms = (noiseFloorRms * (1 - adaptRate)) + (rms * adaptRate);
+					if (useMediaRecorderSTT && mobileRecording && !mobileSilenceStartedAt) {
+						mobileSilenceStartedAt = Date.now();
+					}
 				}
 
 				if (speechFrames >= SPEECH_START_FRAMES) {
@@ -657,7 +671,14 @@
 				}
 
 				if (silenceFrames >= SPEECH_END_FRAMES) {
-					if (useMediaRecorderSTT && callActive && !botSpeaking && mobileRecording) {
+					if (
+						useMediaRecorderSTT &&
+						callActive &&
+						!botSpeaking &&
+						mobileRecording &&
+						mobileSilenceStartedAt &&
+						(Date.now() - mobileSilenceStartedAt) >= MOBILE_SILENCE_COMMIT_MS
+					) {
 						stopMobileRecording(false);
 					}
 
@@ -694,6 +715,7 @@
 			mobileRecording = false;
 			mobileRecordStartedAt = 0;
 			lastSpeechDetectedAt = 0;
+			mobileSilenceStartedAt = 0;
 			recorderChunks = [];
 			mediaRecorder = null;
 
