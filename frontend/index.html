@@ -822,11 +822,11 @@
 					setVAD(shouldShowVoice, shouldShowVoice ? "Voice detected" : "Listening for speech");
 
 					if (useMediaRecorderSTT) {
-						if (callActive && !botSpeaking && speechActive) {
+						if (callActive && !botSpeaking && speechDetected) {
 							if (isTranscribing) {
 								pendingStartAfterTranscribe = true;
 							} else {
-							startMobileRecording();
+								startMobileRecording();
 							}
 						}
 					} else {
@@ -836,8 +836,8 @@
 						}
 					}
 
-					const bargeInFramesNeeded = useMediaRecorderSTT ? 6 : SPEECH_START_FRAMES;
-					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded && speechActive) {
+					const bargeInFramesNeeded = useMediaRecorderSTT ? 4 : SPEECH_START_FRAMES;
+					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded && speechDetected) {
 						speechFrames = 0;
 						stopBotSpeech();
 						setStatus("Listening");
