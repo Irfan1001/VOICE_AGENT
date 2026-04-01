@@ -269,6 +269,8 @@
 		let mobileRecording = false;
 		let mobileRecordStartedAt = 0;
 		let mobileRecordTimeout = null;
+		let activeAudioElement = null;
+		let activeAudioUrl = "";
 		let lastSpeechDetectedAt = 0;
 		let mobileSilenceStartedAt = 0;
 		let speechCandidateAt = 0;
@@ -390,10 +392,60 @@
 			return out;
 		}
 
-		function getPreferredVoice(langPrefix) {
-			const voices = speechSynthesis.getVoices() || [];
-			const match = voices.find((v) => (v.lang || "").toLowerCase().startsWith(langPrefix));
-			return match || null;
+		function resetVADForNextTurn() {
+			speechFrames = 0;
+			silenceFrames = 0;
+			speechCandidateAt = 0;
+			silenceCandidateAt = 0;
+			speechActive = false;
+			currentSpeechLike = false;
+			mobileSilenceStartedAt = 0;
+			lastSpeechDetectedAt = 0;
+			smoothedRms = 0;
+			smoothedSpeechRatio = 0;
+			noiseFloorRms = 0.008;
+			if (callActive) {
+				setVAD(false, "Listening for speech");
+			}
+		}
+
+		async function speakUsingServerTTS(text, lang) {
+			const response = await fetch("/tts", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ text, lang })
+			});
+			if (!response.ok) {
+				throw new Error(`TTS HTTP ${response.status}`);
+			}
+			const blob = await response.blob();
+			const url = URL.createObjectURL(blob);
+			return new Promise((resolve, reject) => {
+				const audio = new Audio(url);
+				activeAudioElement = audio;
+				activeAudioUrl = url;
+				const cleanup = () => {
+					if (activeAudioElement === audio) {
+						activeAudioElement = null;
+					}
+					if (activeAudioUrl === url) {
+						activeAudioUrl = "";
+					}
+					URL.revokeObjectURL(url);
+				};
+				audio.onended = () => {
+					cleanup();
+					resolve();
+				};
+				audio.onerror = () => {
+					cleanup();
+					reject(new Error("Audio playback failed"));
+				};
+				audio.play().catch((error) => {
+					cleanup();
+					reject(error);
+				});
+			});
 		}
 
 		function appendMessage(role, text) {
@@ -893,10 +945,19 @@
 			if (useMediaRecorderSTT) {
 				stopMobileRecording(true);
 			}
+			if (activeAudioElement) {
+				activeAudioElement.pause();
+				activeAudioElement.src = "";
+				activeAudioElement = null;
+			}
+			if (activeAudioUrl) {
+				URL.revokeObjectURL(activeAudioUrl);
+				activeAudioUrl = "";
+			}
 			ttsQueue = [];
 			streamTextBuffer = "";
 			botSpeaking = false;
-			speechSynthesis.cancel();
+			resetVADForNextTurn();
 		}
 
 		function pumpSpeechQueue() {
@@ -906,8 +967,11 @@
 			if (botSpeaking || ttsQueue.length === 0) {
 				if (!botSpeaking && ttsQueue.length === 0) {
 					setStatus("Listening");
+					resetVADForNextTurn();
 					if (!useMediaRecorderSTT) {
 						startRecognition();
+					} else if (currentSpeechLike && !isTranscribing) {
+						startMobileRecording();
 					}
 				}
 				return;
@@ -926,35 +990,21 @@
 			setStatus("Speaking");
 
 			const normalizedChunk = normalizeTextForTTS(chunk);
-			const utterance = new SpeechSynthesisUtterance(normalizedChunk);
 			const urduText = containsUrdu(chunk);
-			if (urduText) {
-				utterance.lang = "ur-PK";
-				const urVoice = getPreferredVoice("ur");
-				if (urVoice) {
-					utterance.voice = urVoice;
-				}
-			} else {
-				utterance.lang = "en-US";
-				const enVoice = getPreferredVoice("en");
-				if (enVoice) {
-					utterance.voice = enVoice;
-				}
-			}
-			utterance.rate = urduText ? 0.92 : 0.97;
-			utterance.pitch = 1;
-			utterance.onend = () => {
-				if (!botSpeaking) {
-					return;
-				}
-				botSpeaking = false;
-				pumpSpeechQueue();
-			};
-			utterance.onerror = () => {
-				botSpeaking = false;
-				pumpSpeechQueue();
-			};
-			speechSynthesis.speak(utterance);
+			speakUsingServerTTS(normalizedChunk, urduText ? "ur-PK" : "en-US")
+				.then(() => {
+					if (!botSpeaking) {
+						return;
+					}
+					botSpeaking = false;
+					resetVADForNextTurn();
+					pumpSpeechQueue();
+				})
+				.catch(() => {
+					botSpeaking = false;
+					resetVADForNextTurn();
+					pumpSpeechQueue();
+				});
 		}
 
 		function queueSpeech(text) {

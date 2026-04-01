@@ -1,12 +1,15 @@
 import uuid
 import json
 import io
+import os
+import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel
 
 from backend.rag import search
 
@@ -26,6 +29,10 @@ Guidelines:
 4. If the question is ambiguous or unclear, ask the user to rephrase or clarify before saying you don't know.
 5. Only if the topic is genuinely absent from the KB after doing your best, say: "I don't have specific information on that right now. I can help connect you to a human agent if you'd like."
 6. Keep responses short and conversational — suitable for voice output. Avoid bullet lists.
+7. If the user asks in English, reply only in English.
+8. If the user asks in Urdu, reply only in Urdu.
+9. Only support English and Urdu. If the user asks in any other language, reply: "Sorry, I can only help in English or Urdu."
+10. Do not mix English and Urdu unless the user mixes them first.
 """
 WELCOME_MESSAGE = "Welcome to IST University. How may I help you today?"
 
@@ -71,6 +78,41 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 	text = (getattr(result, "text", "") or "").strip()
 	return {"text": text}
+
+
+class TTSRequest(BaseModel):
+	text: str
+	lang: str = "en-US"
+
+
+@app.post("/tts")
+async def synthesize_tts(payload: TTSRequest):
+	text = (payload.text or "").strip()
+	if not text:
+		raise HTTPException(status_code=400, detail="Text is required")
+
+	instructions = "Speak clearly and naturally."
+	if payload.lang.lower().startswith("ur"):
+		instructions = "Speak naturally in Urdu with clear pronunciation and moderate pace."
+
+	try:
+		result = client.audio.speech.create(
+			model="gpt-4o-mini-tts",
+			voice="alloy",
+			input=text,
+			instructions=instructions,
+		)
+		with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+			tmp_path = tmp.name
+		result.stream_to_file(tmp_path)
+		audio_bytes = Path(tmp_path).read_bytes()
+	except Exception as exc:
+		raise HTTPException(status_code=502, detail=f"TTS failed: {exc}") from exc
+	finally:
+		if "tmp_path" in locals() and os.path.exists(tmp_path):
+			os.remove(tmp_path)
+
+	return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
 @app.websocket("/ws")
