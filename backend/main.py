@@ -58,8 +58,13 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 	try:
 		result = client.audio.transcriptions.create(
-			model="gpt-4o-mini-transcribe",
+			model="gpt-4o-transcribe",
 			file=buffer,
+			prompt=(
+				"This is an IST university admissions support call from Pakistan. "
+				"Recognize English, Urdu, and mixed code-switch speech accurately. "
+				"Preserve names, abbreviations, and phone numbers exactly as spoken."
+			),
 		)
 	except Exception as exc:
 		raise HTTPException(status_code=502, detail=f"Transcription failed: {exc}") from exc

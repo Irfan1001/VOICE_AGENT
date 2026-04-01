@@ -335,6 +335,67 @@
 			}
 		}
 
+		function containsUrdu(text) {
+			return /[\u0600-\u06FF]/.test(text || "");
+		}
+
+		function normalizeTTSNumbers(text) {
+			let out = text;
+
+			// Read phone-like strings digit-by-digit instead of as large numbers.
+			out = out.replace(/\+?\d[\d\s-]{6,}\d/g, (match) => {
+				const digits = match.replace(/[^\d+]/g, "");
+				if (!digits) {
+					return match;
+				}
+				if (digits.startsWith("+")) {
+					return `plus ${digits.slice(1).split("").join(" ")}`;
+				}
+				return digits.split("").join(" ");
+			});
+
+			// Also split long plain numbers for clearer reading.
+			out = out.replace(/\b\d{6,}\b/g, (m) => m.split("").join(" "));
+			return out;
+		}
+
+		function normalizeTTSAbbreviations(text) {
+			let out = text;
+			out = out.replace(/\bDr\.?\b/gi, "Doctor");
+			out = out.replace(/\bMr\.?\b/gi, "Mister");
+			out = out.replace(/\bMrs\.?\b/gi, "Misses");
+			out = out.replace(/\bMs\.?\b/gi, "Miss");
+			out = out.replace(/\bProf\.?\b/gi, "Professor");
+			out = out.replace(/\bPh\.D\.?\b/gi, "P H D");
+			out = out.replace(/\bM\.S\.?\b/gi, "M S");
+
+			// Spell out short all-caps acronyms so TTS pronounces clearly.
+			out = out.replace(/\b[A-Z]{2,5}\b/g, (m) => {
+				const keepAsWord = ["IST", "SUPARCO", "HEC", "PEC", "NTS", "HBL", "CDC"];
+				if (keepAsWord.includes(m)) {
+					return m.split("").join(" ");
+				}
+				return m.split("").join(" ");
+			});
+			return out;
+		}
+
+		function normalizeTextForTTS(text) {
+			if (!text) {
+				return "";
+			}
+			let out = text;
+			out = normalizeTTSAbbreviations(out);
+			out = normalizeTTSNumbers(out);
+			return out;
+		}
+
+		function getPreferredVoice(langPrefix) {
+			const voices = speechSynthesis.getVoices() || [];
+			const match = voices.find((v) => (v.lang || "").toLowerCase().startsWith(langPrefix));
+			return match || null;
+		}
+
 		function appendMessage(role, text) {
 			const message = document.createElement("div");
 			message.className = `message ${role}`;
@@ -864,7 +925,24 @@
 			stopRecognition();
 			setStatus("Speaking");
 
-			const utterance = new SpeechSynthesisUtterance(chunk);
+			const normalizedChunk = normalizeTextForTTS(chunk);
+			const utterance = new SpeechSynthesisUtterance(normalizedChunk);
+			const urduText = containsUrdu(chunk);
+			if (urduText) {
+				utterance.lang = "ur-PK";
+				const urVoice = getPreferredVoice("ur");
+				if (urVoice) {
+					utterance.voice = urVoice;
+				}
+			} else {
+				utterance.lang = "en-US";
+				const enVoice = getPreferredVoice("en");
+				if (enVoice) {
+					utterance.voice = enVoice;
+				}
+			}
+			utterance.rate = urduText ? 0.92 : 0.97;
+			utterance.pitch = 1;
 			utterance.onend = () => {
 				if (!botSpeaking) {
 					return;
