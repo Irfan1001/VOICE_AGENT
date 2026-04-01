@@ -249,7 +249,7 @@
 
 		const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 		const isMobileBrowser = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent || "");
-		const useMediaRecorderSTT = isMobileBrowser;
+		const useMediaRecorderSTT = typeof MediaRecorder !== "undefined";
 		const wsHost = window.location.host || "127.0.0.1:8000";
 		const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
 		const wsUrl = `${wsProtocol}://${wsHost}/ws`;
@@ -271,6 +271,15 @@
 		let mobileRecordTimeout = null;
 		let lastSpeechDetectedAt = 0;
 		let mobileSilenceStartedAt = 0;
+		let speechCandidateAt = 0;
+		let silenceCandidateAt = 0;
+		let speechActive = false;
+		let currentSpeechLike = false;
+		let smoothedRms = 0;
+		let smoothedSpeechRatio = 0;
+		let isTranscribing = false;
+		let pendingStartAfterTranscribe = false;
+		let nextRecordAllowedAt = 0;
 
 		let ttsQueue = [];
 		let streamTextBuffer = "";
@@ -296,14 +305,16 @@
 		const STALE_RECOGNITION_MS = 5200;
 		const RECOVERY_COOLDOWN_MS = 2600;
 		const INTERIM_COMMIT_MIN_AGE_MS = 450;
-		const MOBILE_MIN_RECORD_MS = 1200;
-		const MOBILE_MAX_RECORD_MS = 12000;
-		const MOBILE_SILENCE_COMMIT_MS = 850;
-		const MOBILE_SPEECH_HOLD_MS = 180;
-		const MOBILE_RMS_GATE_MULTIPLIER = 1.12;
-		const MOBILE_SPEECH_RATIO_GATE = 0.54;
-		const MOBILE_START_FRAMES = 8;
-		const MOBILE_BARGE_IN_FRAMES = 14;
+		const MOBILE_MIN_RECORD_MS = 900;
+		const MOBILE_MAX_RECORD_MS = 10000;
+		const MOBILE_SILENCE_COMMIT_MS = 700;
+		const MOBILE_SPEECH_START_HOLD_MS = 180;
+		const MOBILE_TRANSCRIBE_COOLDOWN_MS = 220;
+		const MOBILE_VAD_SMOOTHING_ALPHA = 0.2;
+		const MOBILE_RMS_ENTER_MULT = 1.18;
+		const MOBILE_RMS_EXIT_MULT = 0.82;
+		const MOBILE_RATIO_ENTER = 0.56;
+		const MOBILE_RATIO_EXIT = 0.40;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -421,6 +432,8 @@
 					return;
 				}
 
+				isTranscribing = true;
+				pendingStartAfterTranscribe = false;
 				try {
 					setStatus("Transcribing");
 					const formData = new FormData();
@@ -434,12 +447,22 @@
 					commitUserQuery(text);
 				} catch (_error) {
 					setStatus("Listening");
+				} finally {
+					isTranscribing = false;
+					nextRecordAllowedAt = Date.now() + MOBILE_TRANSCRIBE_COOLDOWN_MS;
+					if (pendingStartAfterTranscribe && callActive && !botSpeaking && currentSpeechLike) {
+						startMobileRecording();
+					}
+					pendingStartAfterTranscribe = false;
 				}
 			};
 		}
 
 		function startMobileRecording() {
-			if (!useMediaRecorderSTT || !callActive || botSpeaking || mobileRecording || !mediaRecorder) {
+			if (!useMediaRecorderSTT || !callActive || botSpeaking || mobileRecording || !mediaRecorder || isTranscribing) {
+				return;
+			}
+			if (Date.now() < nextRecordAllowedAt) {
 				return;
 			}
 
@@ -448,6 +471,8 @@
 			mobileRecordStartedAt = Date.now();
 			lastSpeechDetectedAt = mobileRecordStartedAt;
 			mobileSilenceStartedAt = 0;
+			speechCandidateAt = 0;
+			silenceCandidateAt = 0;
 			setStatus("Listening");
 
 			try {
@@ -485,6 +510,8 @@
 			mobileRecordStartedAt = 0;
 			lastSpeechDetectedAt = 0;
 			mobileSilenceStartedAt = 0;
+			speechCandidateAt = 0;
+			silenceCandidateAt = 0;
 			if (mobileRecordTimeout) {
 				clearTimeout(mobileRecordTimeout);
 				mobileRecordTimeout = null;
@@ -621,40 +648,73 @@
 				}
 				const speechRatio = totalEnergy > 0 ? speechBandEnergy / totalEnergy : 0;
 
+				const now = Date.now();
 				const baseGate = Math.max(MIN_RMS_GATE, noiseFloorRms * 2.8);
 				const dynamicGate = botSpeaking ? baseGate * 1.25 : baseGate;
 				const isSpeechLike = rms > dynamicGate && speechRatio > SPEECH_RATIO_GATE;
-				const mobileGate = dynamicGate * MOBILE_RMS_GATE_MULTIPLIER;
-				const mobileRatioGate = botSpeaking ? Math.max(0.62, MOBILE_SPEECH_RATIO_GATE) : MOBILE_SPEECH_RATIO_GATE;
-				const mobileSpeechLikeNow = rms > mobileGate && speechRatio > mobileRatioGate;
-				const holdSpeech = useMediaRecorderSTT && mobileRecording && (Date.now() - lastSpeechDetectedAt) <= MOBILE_SPEECH_HOLD_MS;
-				const speechDetected = useMediaRecorderSTT ? (mobileSpeechLikeNow || holdSpeech) : isSpeechLike;
+
+				smoothedRms = smoothedRms ? (smoothedRms * (1 - MOBILE_VAD_SMOOTHING_ALPHA)) + (rms * MOBILE_VAD_SMOOTHING_ALPHA) : rms;
+				smoothedSpeechRatio = smoothedSpeechRatio ? (smoothedSpeechRatio * (1 - MOBILE_VAD_SMOOTHING_ALPHA)) + (speechRatio * MOBILE_VAD_SMOOTHING_ALPHA) : speechRatio;
+
+				const enterGate = dynamicGate * MOBILE_RMS_ENTER_MULT;
+				const exitGate = Math.max(MIN_RMS_GATE * 0.9, dynamicGate * MOBILE_RMS_EXIT_MULT);
+				const mobileSpeechLikeNow = speechActive
+					? (smoothedRms > exitGate && smoothedSpeechRatio > MOBILE_RATIO_EXIT)
+					: (smoothedRms > enterGate && smoothedSpeechRatio > MOBILE_RATIO_ENTER);
+				const speechDetected = useMediaRecorderSTT ? mobileSpeechLikeNow : isSpeechLike;
+				currentSpeechLike = speechDetected;
 
 				if (speechDetected) {
 					speechFrames += 1;
 					silenceFrames = 0;
-					if (!useMediaRecorderSTT || mobileSpeechLikeNow) {
-						lastSpeechDetectedAt = Date.now();
+					if (useMediaRecorderSTT) {
+						if (!speechCandidateAt) {
+							speechCandidateAt = now;
+						}
+						if (!speechActive && (now - speechCandidateAt) >= MOBILE_SPEECH_START_HOLD_MS) {
+							speechActive = true;
+							lastSpeechDetectedAt = now;
+						}
+						if (speechActive) {
+							lastSpeechDetectedAt = now;
+						}
+						silenceCandidateAt = 0;
+						mobileSilenceStartedAt = 0;
+					} else {
+						lastSpeechDetectedAt = now;
 					}
-					mobileSilenceStartedAt = 0;
 				} else {
 					silenceFrames += 1;
 					speechFrames = 0;
 					const adaptRate = botSpeaking ? 0.01 : NOISE_ADAPT_RATE;
 					noiseFloorRms = (noiseFloorRms * (1 - adaptRate)) + (rms * adaptRate);
-					if (useMediaRecorderSTT && mobileRecording && !mobileSilenceStartedAt) {
-						mobileSilenceStartedAt = Date.now();
+					if (useMediaRecorderSTT) {
+						speechCandidateAt = 0;
+						if (speechActive && !silenceCandidateAt) {
+							silenceCandidateAt = now;
+						}
+						if (speechActive && silenceCandidateAt && (now - silenceCandidateAt) >= MOBILE_SILENCE_COMMIT_MS) {
+							speechActive = false;
+							mobileSilenceStartedAt = silenceCandidateAt;
+						}
+						if (mobileRecording && !mobileSilenceStartedAt && !speechActive) {
+							mobileSilenceStartedAt = now;
+						}
 					}
 				}
 
-				const startFramesNeeded = useMediaRecorderSTT ? MOBILE_START_FRAMES : SPEECH_START_FRAMES;
+				const startFramesNeeded = useMediaRecorderSTT ? 2 : SPEECH_START_FRAMES;
 				if (speechFrames >= startFramesNeeded) {
-					const shouldShowVoice = !useMediaRecorderSTT || mobileSpeechLikeNow;
+					const shouldShowVoice = !useMediaRecorderSTT || speechActive;
 					setVAD(shouldShowVoice, shouldShowVoice ? "Voice detected" : "Listening for speech");
 
 					if (useMediaRecorderSTT) {
-						if (callActive && !botSpeaking) {
+						if (callActive && !botSpeaking && speechActive) {
+							if (isTranscribing) {
+								pendingStartAfterTranscribe = true;
+							} else {
 							startMobileRecording();
+							}
 						}
 					} else {
 						recoverRecognitionIfStalled();
@@ -663,8 +723,8 @@
 						}
 					}
 
-					const bargeInFramesNeeded = useMediaRecorderSTT ? MOBILE_BARGE_IN_FRAMES : SPEECH_START_FRAMES;
-					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded) {
+					const bargeInFramesNeeded = useMediaRecorderSTT ? 6 : SPEECH_START_FRAMES;
+					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded && speechActive) {
 						speechFrames = 0;
 						stopBotSpeech();
 						setStatus("Listening");
@@ -685,7 +745,7 @@
 						!botSpeaking &&
 						mobileRecording &&
 						mobileSilenceStartedAt &&
-						(Date.now() - mobileSilenceStartedAt) >= MOBILE_SILENCE_COMMIT_MS
+						(now - mobileSilenceStartedAt) >= MOBILE_SILENCE_COMMIT_MS
 					) {
 						stopMobileRecording(false);
 					}
@@ -707,6 +767,10 @@
 			speechFrames = 0;
 			silenceFrames = 0;
 			noiseFloorRms = 0.01;
+			smoothedRms = 0;
+			smoothedSpeechRatio = 0;
+			speechActive = false;
+			currentSpeechLike = false;
 			setVAD(false, "Listening for speech");
 			vadFrame = requestAnimationFrame(tick);
 		}
@@ -724,6 +788,13 @@
 			mobileRecordStartedAt = 0;
 			lastSpeechDetectedAt = 0;
 			mobileSilenceStartedAt = 0;
+			speechCandidateAt = 0;
+			silenceCandidateAt = 0;
+			speechActive = false;
+			currentSpeechLike = false;
+			isTranscribing = false;
+			pendingStartAfterTranscribe = false;
+			nextRecordAllowedAt = 0;
 			recorderChunks = [];
 			mediaRecorder = null;
 
