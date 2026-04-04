@@ -356,7 +356,10 @@ smoothedRms = smoothedRms * 0.7 + rms * 0.3;
 const now = Date.now();
 const threshold = noiseFloor * SPEECH_MULT;
 if (!speechActive) {
-noiseFloor = noiseFloor * 0.96 + smoothedRms * 0.04;
+// Only adapt noise floor when agent is NOT playing (prevents TTS audio inflating threshold)
+if (activeSrcs.length === 0) {
+noiseFloor = Math.min(0.04, noiseFloor * 0.97 + smoothedRms * 0.03);
+}
 if (smoothedRms > threshold) {
 if (speechStart === 0) speechStart = now;
 if ((now - speechStart) >= MIN_SPEECH_MS) {
@@ -364,7 +367,8 @@ speechActive = true;
 setVAD(true, "Voice detected");
 if (activeSrcs.length > 0 && bargeStart === 0) bargeStart = now;
 }
-} else {
+} else if (smoothedRms < threshold * 0.6) {
+// Hysteresis: only reset speechStart when well below threshold, not on brief dips
 speechStart = 0;
 }
 } else {
