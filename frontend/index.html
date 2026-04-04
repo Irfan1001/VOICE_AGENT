@@ -271,6 +271,7 @@
 		let mobileRecordTimeout = null;
 		let activeAudioElement = null;
 		let activeAudioUrl = "";
+		let micTemporarilyMutedForTTS = false;
 		let lastSpeechDetectedAt = 0;
 		let mobileSilenceStartedAt = 0;
 		let speechCandidateAt = 0;
@@ -288,9 +289,12 @@
 		let activeBotBodyEl = null;
 		let latestInterimTranscript = "";
 		let interimUpdatedAt = 0;
+		let recognitionFinalBuffer = "";
+		let recognitionLastActivityAt = 0;
 		let lastRecognitionStartAt = 0;
 		let lastFinalTranscriptAt = 0;
 		let lastRecognitionRecoveryAt = 0;
+		let activeSpeechStartedAt = 0;
 
 		let speechFrames = 0;
 		let silenceFrames = 0;
@@ -304,19 +308,21 @@
 		const SPEECH_BAND_MAX_HZ = 3400;
 		const SPEECH_RATIO_GATE = 0.58;
 
-		const STALE_RECOGNITION_MS = 5200;
-		const RECOVERY_COOLDOWN_MS = 2600;
-		const INTERIM_COMMIT_MIN_AGE_MS = 450;
-		const MOBILE_MIN_RECORD_MS = 900;
-		const MOBILE_MAX_RECORD_MS = 10000;
-		const MOBILE_SILENCE_COMMIT_MS = 700;
-		const MOBILE_SPEECH_START_HOLD_MS = 180;
+		const STALE_RECOGNITION_MS = 6400;
+		const RECOVERY_COOLDOWN_MS = 3200;
+		const DESKTOP_ENDPOINT_SILENCE_MS = 950;
+		const MOBILE_MIN_RECORD_MS = 1200;
+		const MOBILE_MAX_RECORD_MS = 14000;
+		const MOBILE_SILENCE_COMMIT_MS = 1100;
+		const MOBILE_SPEECH_START_HOLD_MS = 260;
 		const MOBILE_TRANSCRIBE_COOLDOWN_MS = 220;
 		const MOBILE_VAD_SMOOTHING_ALPHA = 0.2;
 		const MOBILE_RMS_ENTER_MULT = 1.18;
 		const MOBILE_RMS_EXIT_MULT = 0.82;
 		const MOBILE_RATIO_ENTER = 0.56;
 		const MOBILE_RATIO_EXIT = 0.40;
+		const MIN_UTTERANCE_CHARS = 2;
+		const BARGE_IN_HOLD_MS = 320;
 
 		let lastStatusText = statusEl.innerText;
 		let lastConnectionText = connectionStateEl.innerText;
@@ -399,6 +405,7 @@
 			silenceCandidateAt = 0;
 			speechActive = false;
 			currentSpeechLike = false;
+			activeSpeechStartedAt = 0;
 			mobileSilenceStartedAt = 0;
 			lastSpeechDetectedAt = 0;
 			smoothedRms = 0;
@@ -422,8 +429,19 @@
 			const url = URL.createObjectURL(blob);
 			return new Promise((resolve, reject) => {
 				const audio = new Audio(url);
+				audio.volume = 1;
+				audio.playsInline = false;
+				audio.setAttribute("playsinline", "false");
+				audio.setAttribute("webkit-playsinline", "false");
 				activeAudioElement = audio;
 				activeAudioUrl = url;
+
+				if (typeof audio.setSinkId === "function") {
+					audio.setSinkId("default").catch(() => {
+						// Ignore: output device selection is not available on all browsers.
+					});
+				}
+
 				const cleanup = () => {
 					if (activeAudioElement === audio) {
 						activeAudioElement = null;
@@ -495,7 +513,7 @@
 
 		function commitUserQuery(text) {
 			const cleanText = (text || "").trim();
-			if (!cleanText) {
+			if (!cleanText || cleanText.length < MIN_UTTERANCE_CHARS) {
 				setStatus("Listening");
 				return;
 			}
@@ -514,6 +532,34 @@
 			if (ws && ws.readyState === WebSocket.OPEN) {
 				ws.send(cleanText);
 			}
+		}
+
+		function resetRecognitionBuffers() {
+			recognitionFinalBuffer = "";
+			latestInterimTranscript = "";
+			interimUpdatedAt = 0;
+			recognitionLastActivityAt = 0;
+		}
+
+		function tryCommitDesktopTurn(force = false) {
+			if (useMediaRecorderSTT || botSpeaking || !callActive) {
+				return;
+			}
+
+			const now = Date.now();
+			const hasCandidate = Boolean(recognitionFinalBuffer.trim() || latestInterimTranscript.trim());
+			if (!hasCandidate) {
+				return;
+			}
+
+			const idleFor = recognitionLastActivityAt ? (now - recognitionLastActivityAt) : 0;
+			if (!force && idleFor < DESKTOP_ENDPOINT_SILENCE_MS) {
+				return;
+			}
+
+			const text = (recognitionFinalBuffer.trim() || latestInterimTranscript.trim());
+			resetRecognitionBuffers();
+			commitUserQuery(text);
 		}
 
 		function setupMediaRecorder() {
@@ -540,7 +586,7 @@
 
 				const blob = new Blob(recorderChunks, { type: "audio/webm" });
 				recorderChunks = [];
-				if (blob.size < 1500) {
+				if (blob.size < 2200) {
 					setStatus("Listening");
 					return;
 				}
@@ -682,19 +728,23 @@
 			};
 
 			recognition.onresult = (event) => {
-				let text = "";
+				let finalText = "";
 				let interim = "";
 				for (let i = event.resultIndex; i < event.results.length; i += 1) {
 					const result = event.results[i];
 					if (result.isFinal) {
-						text += `${result[0].transcript} `;
+						finalText += `${result[0].transcript} `;
 					} else {
 						interim += `${result[0].transcript} `;
 					}
 				}
+				if (finalText.trim()) {
+					recognitionFinalBuffer = `${recognitionFinalBuffer} ${finalText}`.trim();
+					lastFinalTranscriptAt = Date.now();
+				}
 				latestInterimTranscript = interim.trim();
 				interimUpdatedAt = latestInterimTranscript ? Date.now() : 0;
-				commitUserQuery(text);
+				recognitionLastActivityAt = Date.now();
 			};
 
 			recognition.onerror = (event) => {
@@ -703,6 +753,7 @@
 
 			recognition.onend = () => {
 				recognitionRunning = false;
+				tryCommitDesktopTurn(true);
 				if (callActive && !botSpeaking) {
 					startRecognition();
 				} else if (!callActive) {
@@ -780,6 +831,9 @@
 				if (speechDetected) {
 					speechFrames += 1;
 					silenceFrames = 0;
+					if (!activeSpeechStartedAt) {
+						activeSpeechStartedAt = now;
+					}
 					if (useMediaRecorderSTT) {
 						if (!speechCandidateAt) {
 							speechCandidateAt = now;
@@ -799,6 +853,7 @@
 				} else {
 					silenceFrames += 1;
 					speechFrames = 0;
+					activeSpeechStartedAt = 0;
 					const adaptRate = botSpeaking ? 0.01 : NOISE_ADAPT_RATE;
 					noiseFloorRms = (noiseFloorRms * (1 - adaptRate)) + (rms * adaptRate);
 					if (useMediaRecorderSTT) {
@@ -836,8 +891,9 @@
 						}
 					}
 
-					const bargeInFramesNeeded = useMediaRecorderSTT ? 4 : SPEECH_START_FRAMES;
-					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded && speechDetected) {
+					const bargeInFramesNeeded = useMediaRecorderSTT ? 5 : SPEECH_START_FRAMES;
+					const sustainedBargeIn = activeSpeechStartedAt && (now - activeSpeechStartedAt) >= BARGE_IN_HOLD_MS;
+					if (botSpeaking && callActive && speechFrames >= bargeInFramesNeeded && speechDetected && sustainedBargeIn) {
 						speechFrames = 0;
 						stopBotSpeech();
 						setStatus("Listening");
@@ -863,8 +919,8 @@
 						stopMobileRecording(false);
 					}
 
-					if (!useMediaRecorderSTT && callActive && !botSpeaking && latestInterimTranscript && (Date.now() - interimUpdatedAt) > INTERIM_COMMIT_MIN_AGE_MS) {
-						commitUserQuery(latestInterimTranscript);
+					if (!useMediaRecorderSTT && callActive && !botSpeaking) {
+						tryCommitDesktopTurn(false);
 					}
 
 					if (callActive) {
@@ -908,6 +964,8 @@
 			isTranscribing = false;
 			pendingStartAfterTranscribe = false;
 			nextRecordAllowedAt = 0;
+			micTemporarilyMutedForTTS = false;
+			resetRecognitionBuffers();
 			recorderChunks = [];
 			mediaRecorder = null;
 
@@ -944,6 +1002,12 @@
 		function stopBotSpeech() {
 			if (useMediaRecorderSTT) {
 				stopMobileRecording(true);
+				if (micTemporarilyMutedForTTS && micStream) {
+					micStream.getAudioTracks().forEach((track) => {
+						track.enabled = true;
+					});
+					micTemporarilyMutedForTTS = false;
+				}
 			}
 			if (activeAudioElement) {
 				activeAudioElement.pause();
@@ -954,6 +1018,7 @@
 				URL.revokeObjectURL(activeAudioUrl);
 				activeAudioUrl = "";
 			}
+			tryCommitDesktopTurn(true);
 			ttsQueue = [];
 			streamTextBuffer = "";
 			botSpeaking = false;
@@ -966,6 +1031,12 @@
 			}
 			if (botSpeaking || ttsQueue.length === 0) {
 				if (!botSpeaking && ttsQueue.length === 0) {
+					if (micTemporarilyMutedForTTS && micStream) {
+						micStream.getAudioTracks().forEach((track) => {
+							track.enabled = true;
+						});
+						micTemporarilyMutedForTTS = false;
+					}
 					setStatus("Listening");
 					resetVADForNextTurn();
 					if (!useMediaRecorderSTT) {
@@ -986,6 +1057,13 @@
 			botSpeaking = true;
 			speechFrames = 0;
 			silenceFrames = 0;
+			if (useMediaRecorderSTT && micStream) {
+				stopMobileRecording(true);
+				micStream.getAudioTracks().forEach((track) => {
+					track.enabled = false;
+				});
+				micTemporarilyMutedForTTS = true;
+			}
 			stopRecognition();
 			setStatus("Speaking");
 
@@ -1066,6 +1144,7 @@
 
 					if (payload.type === "stream_start") {
 						streamTextBuffer = "";
+						setStatus("Generating response");
 						beginBotStreamMessage();
 						return;
 					}
@@ -1083,6 +1162,7 @@
 
 					if (payload.type === "stream_end") {
 						flushStreamText(true);
+						setStatus("Speaking");
 						endBotStreamMessage();
 					}
 				};
@@ -1112,6 +1192,7 @@
 				callActive = true;
 				latestInterimTranscript = "";
 				interimUpdatedAt = 0;
+				resetRecognitionBuffers();
 				lastRecognitionStartAt = 0;
 				lastFinalTranscriptAt = 0;
 				lastRecognitionRecoveryAt = 0;
@@ -1136,6 +1217,7 @@
 			callActive = false;
 			latestInterimTranscript = "";
 			interimUpdatedAt = 0;
+			resetRecognitionBuffers();
 			lastRecognitionStartAt = 0;
 			lastFinalTranscriptAt = 0;
 			lastRecognitionRecoveryAt = 0;

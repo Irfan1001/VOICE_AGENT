@@ -4,6 +4,7 @@ import io
 import os
 import tempfile
 from pathlib import Path
+from collections import deque
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +20,40 @@ app = FastAPI()
 client = OpenAI()
 
 sessions = {}
+session_order = deque()
+
+
+def _env_int(name: str, default: int) -> int:
+	value = os.getenv(name)
+	if value is None:
+		return default
+	try:
+		return int(value)
+	except ValueError:
+		return default
+
+
+def _env_float(name: str, default: float) -> float:
+	value = os.getenv(name)
+	if value is None:
+		return default
+	try:
+		return float(value)
+	except ValueError:
+		return default
+
+
+APP_CONFIG = {
+	"chat_model": os.getenv("CHAT_MODEL", "gpt-4o-mini"),
+	"transcribe_model": os.getenv("TRANSCRIBE_MODEL", "gpt-4o-transcribe"),
+	"tts_model": os.getenv("TTS_MODEL", "gpt-4o-mini-tts"),
+	"retrieval_k": _env_int("RAG_TOP_K", 6),
+	"max_tokens": _env_int("CHAT_MAX_TOKENS", 220),
+	"temperature": _env_float("CHAT_TEMPERATURE", 0.2),
+	"max_sessions": _env_int("MAX_SESSIONS", 500),
+	"history_cap": _env_int("SESSION_HISTORY_CAP", 13),
+}
+
 SYSTEM_PROMPT = """You are the IST University voice assistant.
 Your role is to help students and parents with admissions, fee structure, programs, campus life, and all IST-related queries.
 
@@ -45,8 +80,31 @@ def get_history(session_id):
 def save_message(session_id, role, content):
 	sessions.setdefault(session_id, []).append({"role": role, "content": content})
 	# Keep only recent history to avoid prompt bloat and latency spikes.
-	if len(sessions[session_id]) > 13:
-		sessions[session_id] = [sessions[session_id][0], *sessions[session_id][-12:]]
+	history_cap = max(APP_CONFIG["history_cap"], 3)
+	if len(sessions[session_id]) > history_cap:
+		sessions[session_id] = [sessions[session_id][0], *sessions[session_id][-(history_cap - 1):]]
+
+
+def register_session(session_id: str):
+	session_order.append(session_id)
+	max_sessions = max(APP_CONFIG["max_sessions"], 50)
+	while len(session_order) > max_sessions:
+		old_id = session_order.popleft()
+		sessions.pop(old_id, None)
+
+
+def build_user_prompt(context: str, question: str) -> str:
+	return f"""
+Answer only from context.
+If the user asks about a person and their name appears in context, provide their role/affiliation from context.
+If context is insufficient, ask a short clarification question.
+
+Context:
+{context}
+
+Question:
+{question}
+"""
 
 
 @app.get("/health")
@@ -65,7 +123,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 	try:
 		result = client.audio.transcriptions.create(
-			model="gpt-4o-transcribe",
+			model=APP_CONFIG["transcribe_model"],
 			file=buffer,
 			prompt=(
 				"This is an IST university admissions support call from Pakistan. "
@@ -97,7 +155,7 @@ async def synthesize_tts(payload: TTSRequest):
 
 	try:
 		result = client.audio.speech.create(
-			model="gpt-4o-mini-tts",
+			model=APP_CONFIG["tts_model"],
 			voice="alloy",
 			input=text,
 			instructions=instructions,
@@ -121,25 +179,18 @@ async def websocket_endpoint(ws: WebSocket):
 
 	session_id = str(uuid.uuid4())
 	sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+	register_session(session_id)
 	await ws.send_text(WELCOME_MESSAGE)
 	save_message(session_id, "assistant", WELCOME_MESSAGE)
 
 	try:
 		while True:
-			question = await ws.receive_text()
-			context = search(question, k=6)
+			question = (await ws.receive_text()).strip()
+			if not question:
+				continue
 
-			user_prompt = f"""
-Answer only from context.
-If the user asks about a person and their name appears in context, provide their role/affiliation from context.
-If context is insufficient, ask a short clarification question.
-
-Context:
-{context}
-
-Question:
-{question}
-"""
+			context = search(question, k=max(APP_CONFIG["retrieval_k"], 1))
+			user_prompt = build_user_prompt(context=context, question=question)
 
 			# Inject retrieval context only for the current turn (do not persist it in chat history).
 			messages = [
@@ -147,13 +198,22 @@ Question:
 				{"role": "user", "content": user_prompt},
 			]
 
-			response = client.chat.completions.create(
-				model="gpt-4o-mini",
-				messages=messages,
-				temperature=0.2,
-				max_tokens=220,
-				stream=True,
-			)
+			try:
+				response = client.chat.completions.create(
+					model=APP_CONFIG["chat_model"],
+					messages=messages,
+					temperature=APP_CONFIG["temperature"],
+					max_tokens=APP_CONFIG["max_tokens"],
+					stream=True,
+				)
+			except Exception:
+				fallback = "I am having trouble answering right now. Please try again in a moment."
+				await ws.send_text(json.dumps({"type": "stream_start"}))
+				await ws.send_text(json.dumps({"type": "stream_delta", "text": fallback}))
+				await ws.send_text(json.dumps({"type": "stream_end"}))
+				save_message(session_id, "user", question)
+				save_message(session_id, "assistant", fallback)
+				continue
 
 			await ws.send_text(json.dumps({"type": "stream_start"}))
 			parts = []
@@ -171,6 +231,10 @@ Question:
 			save_message(session_id, "assistant", answer)
 	except WebSocketDisconnect:
 		sessions.pop(session_id, None)
+		try:
+			session_order.remove(session_id)
+		except ValueError:
+			pass
 
 
 # Serve the frontend — must be mounted AFTER all API/WebSocket routes.
