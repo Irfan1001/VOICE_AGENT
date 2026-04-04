@@ -241,12 +241,12 @@
 
 <script>
 // -------------------------------------------------------------------------
-// IST University Voice Agent — Frontend
+// IST University Voice Agent ï¿½ Frontend
 // Simple architecture:
 //   AudioWorklet (mic PCM16, 24 kHz)
 //   ? WebSocket ? FastAPI ? OpenAI Realtime API
 //   ? PCM16 audio chunks ? Realtime events
-// VAD: 2 constants only — SPEECH_THRESHOLD and SILENCE_MS
+// VAD: 2 constants only ï¿½ SPEECH_THRESHOLD and SILENCE_MS
 // -------------------------------------------------------------------------
 
 // -- AudioWorklet (inlined as Blob URL) ----------------------------------
@@ -271,9 +271,12 @@ class MicProcessor extends AudioWorkletProcessor {
 registerProcessor("mic-proc", MicProcessor);
 `;
 
-// -- VAD settings — the only 2 values you ever need to tune --------------
-const SPEECH_THRESHOLD = 0.015;  // RMS level that counts as speech
-const SILENCE_MS       = 800;    // ms of quiet before committing utterance
+// -- VAD settings ï¿½ the only 2 values you ever need to tune --------------
+const SPEECH_MULT   = 4.5;   // x noise floor to enter speech
+const SILENCE_MS    = 900;   // ms of quiet after speech to commit
+const MIN_SPEECH_MS = 300;   // ignore bursts shorter than this
+const MAX_SPEECH_MS = 14000; // force-commit after this duration
+const BARGE_HOLD_MS = 250;   // sustained speech before interrupting agent
 
 // -- State ----------------------------------------------------------------
 let ws           = null;
@@ -286,6 +289,12 @@ let silenceTimer = null;
 let nextPlayAt   = 0;
 let activeSrcs   = [];
 let botBodyEl    = null;
+
+// VAD adaptive state
+let noiseFloor   = 0.006;
+let smoothedRms  = 0;
+let speechStart  = 0;
+let bargeStart   = 0;
 
 // -- DOM refs -------------------------------------------------------------
 const statusEl  = document.getElementById("status");
@@ -317,11 +326,10 @@ logEl.scrollTop = logEl.scrollHeight;
 return body;
 }
 
-// -- PCM16 playback -------------------------------------------------------
-function playPCM16(b64) {
-if (!audioCtx || !b64) return;
-const bytes  = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-const int16  = new Int16Array(bytes.buffer);
+// -- PCM16 playback (raw ArrayBuffer) ------------------------------------
+function playPCM16(buffer) {
+if (!audioCtx || !buffer) return;
+const int16  = new Int16Array(buffer);
 const buf    = audioCtx.createBuffer(1, int16.length, 24000);
 const f32    = buf.getChannelData(0);
 for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
@@ -342,26 +350,31 @@ activeSrcs = [];
 nextPlayAt = 0;
 }
 
-// -- VAD ------------------------------------------------------------------
+// -- Adaptive VAD ---------------------------------------------------------
 function handleVAD(rms) {
-if (rms > SPEECH_THRESHOLD) {
+smoothedRms = smoothedRms * 0.7 + rms * 0.3;
+const now = Date.now();
+const threshold = noiseFloor * SPEECH_MULT;
 if (!speechActive) {
+noiseFloor = noiseFloor * 0.96 + smoothedRms * 0.04;
+if (smoothedRms > threshold) {
+if (speechStart === 0) speechStart = now;
+if ((now - speechStart) >= MIN_SPEECH_MS) {
 speechActive = true;
-// Barge-in: user spoke while agent was speaking
-if (activeSrcs.length > 0) {
-stopPlayback();
-if (ws && ws.readyState === WebSocket.OPEN)
-ws.send(JSON.stringify({ type: "barge_in" }));
-}
-}
-clearTimeout(silenceTimer);
-silenceTimer = null;
 setVAD(true, "Voice detected");
-} else if (speechActive && !silenceTimer) {
-// Start silence countdown
+if (activeSrcs.length > 0 && bargeStart === 0) bargeStart = now;
+}
+} else {
+speechStart = 0;
+}
+} else {
+if (smoothedRms <= threshold) {
+if (!silenceTimer) {
 silenceTimer = setTimeout(() => {
 speechActive = false;
 silenceTimer = null;
+speechStart  = 0;
+bargeStart   = 0;
 setVAD(false, "Listening");
 if (callActive && ws && ws.readyState === WebSocket.OPEN) {
 ws.send(JSON.stringify({ type: "commit" }));
@@ -369,51 +382,59 @@ setStatus("Processing");
 }
 }, SILENCE_MS);
 }
+} else {
+clearTimeout(silenceTimer);
+silenceTimer = null;
+if (activeSrcs.length > 0) {
+if (bargeStart === 0) bargeStart = now;
+if ((now - bargeStart) >= BARGE_HOLD_MS) {
+bargeStart = 0;
+stopPlayback();
+if (ws && ws.readyState === WebSocket.OPEN)
+ws.send(JSON.stringify({ type: "barge_in" }));
+}
+}
+if (speechStart > 0 && (now - speechStart) >= MAX_SPEECH_MS) {
+speechActive = false;
+speechStart  = 0;
+bargeStart   = 0;
+setVAD(false, "Listening");
+if (callActive && ws && ws.readyState === WebSocket.OPEN) {
+ws.send(JSON.stringify({ type: "commit" }));
+setStatus("Processing");
+}
+}
+}
+}
 }
 
-// -- Realtime event handler ------------------------------------------------
+// -- WebSocket event handler ----------------------------------------------
 function handleEvent(ev) {
 switch (ev.type) {
-case "session.created":
-case "session.updated":
-setConn("Connected");
-setStatus("Listening");
-setVAD(false, "Listening");
+case "transcript":
+addMsg("user", ev.text || "");
 break;
 
-case "error":
-setStatus("Error: " + (ev.error && ev.error.message ? ev.error.message : "unknown"));
-break;
-
-// User transcript (shown after utterance is committed)
-case "conversation.item.input_audio_transcription.completed":
-addMsg("user", ev.transcript || "");
-break;
-
-// Agent response starts
-case "response.created":
+case "agent_start":
 setStatus("Speaking");
 botBodyEl = addMsg("bot", "");
 break;
 
-// Agent audio chunk — play it
-case "response.audio.delta":
-if (ev.delta) playPCM16(ev.delta);
-break;
-
-// Agent transcript delta — update bubble in real time
-case "response.audio_transcript.delta":
-if (botBodyEl && ev.delta) {
-botBodyEl.textContent += ev.delta;
+case "agent_text_delta":
+if (botBodyEl && ev.text) {
+botBodyEl.textContent += ev.text;
 logEl.scrollTop = logEl.scrollHeight;
 }
 break;
 
-// Agent finished responding
-case "response.done":
+case "agent_end":
 setStatus("Listening");
 setVAD(false, "Listening");
 botBodyEl = null;
+break;
+
+case "error":
+setStatus("Error: " + (ev.msg || "unknown"));
 break;
 }
 }
@@ -425,7 +446,7 @@ setStatus("Starting...");
 setConn("Connecting");
 
 try {
-// AudioContext at 24 kHz — matches OpenAI Realtime PCM16 format
+// AudioContext at 24 kHz ï¿½ matches OpenAI Realtime PCM16 format
 audioCtx = new AudioContext({ sampleRate: 24000 });
 await audioCtx.resume();
 
@@ -440,7 +461,7 @@ autoGainControl: true,
 },
 });
 
-// Load AudioWorklet (inline blob — no separate file needed)
+// Load AudioWorklet (inline blob ï¿½ no separate file needed)
 const blobUrl = URL.createObjectURL(
 new Blob([WORKLET_CODE], { type: "application/javascript" })
 );
@@ -471,7 +492,11 @@ handleVAD(rms);
 };
 
 ws.onmessage = ({ data }) => {
+if (data instanceof ArrayBuffer) {
+playPCM16(data);
+} else {
 try { handleEvent(JSON.parse(data)); } catch (_) {}
+}
 };
 
 ws.onerror   = () => { setConn("Error"); setStatus("Connection error"); endCall(); };
@@ -490,6 +515,8 @@ callActive = false;
 clearTimeout(silenceTimer);
 silenceTimer = null;
 speechActive = false;
+speechStart  = 0;
+bargeStart   = 0;
 stopPlayback();
 _cleanup();
 setStatus("Idle");
