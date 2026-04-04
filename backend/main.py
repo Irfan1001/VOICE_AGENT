@@ -7,8 +7,10 @@ Flow: client streams PCM16 → RMS VAD on client → commit signal →
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 
 import websockets
@@ -25,16 +27,31 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview")
 REALTIME_URL   = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 TTS_VOICE      = os.getenv("TTS_VOICE", "alloy")
-RAG_TOP_K      = int(os.getenv("RAG_TOP_K", "5"))
+RAG_TOP_K      = int(os.getenv("RAG_TOP_K", "4"))
+RAG_CACHE_SIZE = int(os.getenv("RAG_CACHE_SIZE", "256"))
 
 SYSTEM_PROMPT = """You are the IST University voice assistant.
 Help students and parents with admissions, fees, programs, and campus queries.
-Rules:
-- Answer ONLY from the knowledge base context provided each turn. Never invent facts.
-- Be concise and natural — responses are spoken aloud. No bullet lists.
-- Reply in the same language as the user (English or Urdu only).
-- If the answer is not in the context, say: "I don't have that information right now."
+
+Strict rules — follow every one:
+1. LANGUAGE: Always respond in English by default. If the user speaks in Urdu (the Pakistani language written in Nastaliq script), reply in Urdu only. Never use Hindi. Never mix languages unless the user mixes first.
+2. KNOWLEDGE BASE ONLY: Answer ONLY from the [KNOWLEDGE BASE CONTEXT] provided. Never invent, guess, or use outside knowledge. If the answer is not in the context, say exactly: "I'm sorry, I don't have that information in my knowledge base right now."
+3. LENGTH: Keep every response to 1–2 short spoken sentences maximum. After answering, ask if the user has another question.
+4. FORMAT: No bullet lists, no numbered lists, no headers. Speak naturally as if on a phone call.
+5. SCOPE: If the question is completely unrelated to IST University, politely say you can only help with IST-related topics.
 """
+
+
+@lru_cache(maxsize=RAG_CACHE_SIZE)
+def _cached_rag(query_key: str, k: int) -> str:
+	"""Cache RAG results by (query_key, k). query_key is a normalised lowercase query."""
+	return search(query_key, k=k)
+
+
+def rag_search(query: str, k: int) -> str:
+	"""Normalise query and return cached RAG context."""
+	normalised = " ".join(query.lower().split())
+	return _cached_rag(normalised, k)
 
 app = FastAPI()
 
@@ -77,13 +94,14 @@ async def ws_proxy(client_ws: WebSocket):
 		) as oai_ws:
 			await oai_ws.send(json.dumps(session_config))
 
-			# Welcome greeting — triggers an immediate spoken greeting from the agent
+			# Welcome greeting — always in English, 1-2 sentences
 			await oai_ws.send(json.dumps({
 				"type": "response.create",
 				"response": {
 					"instructions": (
-						"Greet the user warmly and briefly. "
-						"Introduce yourself as the IST University voice assistant and ask how you can help."
+						"Greet the user in English only. "
+						"Say: 'Welcome to IST University. How can I help you today?' "
+						"Do not say anything else."
 					),
 				},
 			}))
@@ -130,25 +148,25 @@ async def ws_proxy(client_ws: WebSocket):
 						event   = json.loads(payload)
 						etype   = event.get("type", "")
 
-						# On successful transcription → RAG → update context → respond
+						# Transcription completed → inject RAG context → trigger response
 						if etype == "conversation.item.input_audio_transcription.completed" and pending_commit:
 							pending_commit = False
 							transcript = event.get("transcript", "").strip()
 
 							if transcript:
 								try:
-									context = search(transcript, k=RAG_TOP_K)
+									context = rag_search(transcript, k=RAG_TOP_K)
 									await oai_ws.send(json.dumps({
 										"type": "session.update",
 										"session": {
 											"instructions": (
 												SYSTEM_PROMPT
-												+ f"\n\n[KNOWLEDGE BASE CONTEXT]\n{context}\n[/KNOWLEDGE BASE CONTEXT]"
+												+ f"\n\n[KNOWLEDGE BASE CONTEXT — answer ONLY from this]\n{context}\n[/KNOWLEDGE BASE CONTEXT]"
 											),
 										},
 									}))
 								except Exception:
-									pass  # RAG failure — still respond without context
+									pass  # RAG failure — model will say it doesn't have the info
 
 							await oai_ws.send(json.dumps({"type": "response.create"}))
 
