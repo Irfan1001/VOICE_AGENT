@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<title>IST University Voice Agent</title>
+	<title>IST University STT Monitor</title>
 	<style>
 		:root {
 			--bg: #eef3eb;
@@ -174,6 +174,13 @@
 			border: 1px solid rgba(11, 107, 60, 0.12);
 		}
 
+		.message.user.interim {
+			background: #f5faf6;
+			border: 1px dashed rgba(11, 107, 60, 0.25);
+			color: var(--muted);
+			font-style: italic;
+		}
+
 		.message.bot {
 			background: #fff8eb;
 			border: 1px solid rgba(163, 113, 18, 0.12);
@@ -205,7 +212,7 @@
 	<div class="shell">
 		<section class="hero">
 			<h1>IST UNIVERSITY VOICE AGENT</h1>
-			<p>Start a live voice session for admissions and campus queries grounded in the IST knowledge base.</p>
+
 		</section>
 
 		<section class="content">
@@ -232,476 +239,508 @@
 			</div>
 
 			<div class="panel">
-				<div class="metric-label">Conversation</div>
+				<div class="metric-label">Transcripts</div>
 				<div id="transcriptList" class="transcript-list"></div>
 			</div>
 		</section>
 	</div>
+<script>
 
-	<script>
-		const statusEl = document.getElementById("status");
-		const connectionStateEl = document.getElementById("connectionState");
-		const vadDotEl = document.getElementById("vadDot");
-		const vadTextEl = document.getElementById("vadText");
-		const transcriptListEl = document.getElementById("transcriptList");
-		const dialBtn = document.getElementById("dialBtn");
-		const hangupBtn = document.getElementById("hangupBtn");
-
-		const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-		// Use window.location.host (includes port) so this works both in local dev
-		// (where fastapi runs on 8000) and on Render (where the path is just the hostname).
-		const wsHost = window.location.host || "127.0.0.1:8000";
-		const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-		const wsUrl = `${wsProtocol}://${wsHost}/ws`;
-
-		let ws = null;
-		let recognition = null;
-		let callActive = false;
-		let recognitionRunning = false;
-		let botSpeaking = false;
-		let micStream = null;
-		let audioContext = null;
-		let analyser = null;
-		let vadFrame = null;
-		let ttsQueue = [];
-		let streamTextBuffer = "";
-		let activeBotBodyEl = null;
-		let speechFrames = 0;
-		let silenceFrames = 0;
-		let noiseFloorRms = 0.01;
-		const SPEECH_START_FRAMES = 5;
-		const SPEECH_END_FRAMES = 12;
-		const NOISE_ADAPT_RATE = 0.06;
-		const MIN_RMS_GATE = 0.012;
-		const SPEECH_BAND_MIN_HZ = 170;
-		const SPEECH_BAND_MAX_HZ = 3400;
-		const SPEECH_RATIO_GATE = 0.58;
-
-		let lastStatusText = statusEl.innerText;
-		let lastConnectionText = connectionStateEl.innerText;
-		let lastVadActive = false;
-		let lastVadText = vadTextEl.innerText;
-
-		function setStatus(text) {
-			if (lastStatusText !== text) {
-				lastStatusText = text;
-				statusEl.innerText = text;
-			}
+const WORKLET_CODE = `
+class MicProcessor extends AudioWorkletProcessor {
+	process(inputs) {
+		const channel = inputs[0] && inputs[0][0];
+		if (!channel) return true;
+		const int16 = new Int16Array(channel.length);
+		for (let i = 0; i < channel.length; i++) {
+			const value = Math.max(-1, Math.min(1, channel[i]));
+			int16[i] = value < 0 ? value * 0x8000 : value * 0x7fff;
 		}
+		this.port.postMessage({ buf: int16.buffer }, [int16.buffer]);
+		return true;
+	}
+}
+registerProcessor("mic-proc", MicProcessor);
+`;
 
-		function setConnectionState(text) {
-			if (lastConnectionText !== text) {
-				lastConnectionText = text;
-				connectionStateEl.innerText = text;
-			}
+function decodeBase64ToBytes(base64Text) {
+	const binary = atob(base64Text);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index += 1) {
+		bytes[index] = binary.charCodeAt(index);
+	}
+	return bytes;
+}
+
+function createPCMStreamPlayer(options = {}) {
+	const onStateChange = options.onStateChange || (() => {});
+	let context = null;
+	let gainNode = null;
+	let currentReplyId = null;
+	let sampleRate = 24000;
+	let nextPlayTime = 0;
+	let replyOpen = false;
+	let activeSources = new Set();
+	let stateTimer = null;
+
+	function clearStateTimer() {
+		if (!stateTimer) return;
+		clearTimeout(stateTimer);
+		stateTimer = null;
+	}
+
+	function hasScheduledAudio() {
+		return Boolean(context) && nextPlayTime > context.currentTime + 0.02;
+	}
+
+	function emitState() {
+		onStateChange({
+			playing: activeSources.size > 0 || hasScheduledAudio(),
+			queued: replyOpen || activeSources.size > 0 || hasScheduledAudio(),
+		});
+
+		if (!replyOpen && hasScheduledAudio()) {
+			clearStateTimer();
+			stateTimer = setTimeout(() => {
+				stateTimer = null;
+				emitState();
+			}, Math.max(40, ((nextPlayTime - context.currentTime) * 1000) + 40));
 		}
+	}
 
-		if (!SpeechRecognition) {
-			setStatus("Speech recognition unsupported");
-			dialBtn.disabled = true;
-			appendMessage("bot", "This browser does not support speech recognition. Please use Chrome or Edge.");
-		} else {
-			recognition = new SpeechRecognition();
-			recognition.continuous = true;
-			recognition.interimResults = false;
-			recognition.lang = "en-US";
+	return {
+		bindContext(nextContext) {
+			context = nextContext;
+			if (!context) return;
+			if (gainNode) {
+				try {
+					gainNode.disconnect();
+				} catch (_) {
+					// no-op
+				}
+			}
+			gainNode = context.createGain();
+			gainNode.gain.value = 1;
+			gainNode.connect(context.destination);
+			nextPlayTime = context.currentTime;
+			emitState();
+		},
 
-			recognition.onstart = () => {
-				recognitionRunning = true;
-				setStatus("Listening");
+		startReply(replyId, nextSampleRate) {
+			this.stopReply();
+			currentReplyId = replyId;
+			sampleRate = nextSampleRate || 24000;
+			replyOpen = true;
+			nextPlayTime = context ? context.currentTime + 0.05 : 0;
+			emitState();
+		},
+
+		appendChunk(replyId, base64Audio) {
+			if (!context || !gainNode || replyId !== currentReplyId || !base64Audio) return;
+
+			const bytes = decodeBase64ToBytes(base64Audio);
+			const sampleCount = Math.floor(bytes.byteLength / 2);
+			if (!sampleCount) return;
+
+			const pcm = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+			const channelData = new Float32Array(sampleCount);
+			for (let index = 0; index < sampleCount; index += 1) {
+				channelData[index] = pcm.getInt16(index * 2, true) / 32768;
+			}
+
+			const audioBuffer = context.createBuffer(1, sampleCount, sampleRate);
+			audioBuffer.copyToChannel(channelData, 0);
+
+			const source = context.createBufferSource();
+			source.buffer = audioBuffer;
+			source.connect(gainNode);
+
+			const startAt = Math.max(nextPlayTime, context.currentTime + 0.02);
+			source.start(startAt);
+			nextPlayTime = startAt + audioBuffer.duration;
+
+			activeSources.add(source);
+			source.onended = () => {
+				activeSources.delete(source);
+				emitState();
 			};
 
-			recognition.onresult = (event) => {
-				const text = event.results[event.results.length - 1][0].transcript.trim();
-				if (!text) {
-					return;
+			emitState();
+		},
+
+		finishReply(replyId) {
+			if (replyId !== currentReplyId) return;
+			replyOpen = false;
+			emitState();
+		},
+
+		stopReply(replyId = null) {
+			if (replyId !== null && replyId !== currentReplyId) return;
+			clearStateTimer();
+			replyOpen = false;
+			for (const source of activeSources) {
+				try {
+					source.stop(0);
+				} catch (_) {
+					// no-op
 				}
-				// Barge-in: user spoke while agent was answering — cancel speech immediately
-				if (botSpeaking) {
-					stopBotSpeech();
-					setStatus("Listening");
+			}
+			activeSources = new Set();
+			currentReplyId = null;
+			nextPlayTime = context ? context.currentTime : 0;
+			emitState();
+		},
+
+		dispose() {
+			this.stopReply();
+			if (gainNode) {
+				try {
+					gainNode.disconnect();
+				} catch (_) {
+					// no-op
 				}
-				appendMessage("user", text);
-				setStatus("Sending query");
-				if (ws && ws.readyState === WebSocket.OPEN) {
-					ws.send(text);
-				}
+			}
+			gainNode = null;
+			context = null;
+		},
+	};
+}
+
+let ws = null;
+let audioCtx = null;
+let workletNode = null;
+let micStream = null;
+let callActive = false;
+let interimEl = null;
+let botStreamingEl = null;
+let userSpeaking = false;
+let processingTurn = false;
+let agentStreaming = false;
+let ttsState = { playing: false, queued: false };
+const statusEl = document.getElementById("status");
+const connEl = document.getElementById("connectionState");
+const vadDotEl = document.getElementById("vadDot");
+const vadTextEl = document.getElementById("vadText");
+const logEl = document.getElementById("transcriptList");
+const dialBtn = document.getElementById("dialBtn");
+const hangBtn = document.getElementById("hangupBtn");
+const ttsPlayer = createPCMStreamPlayer({
+	onStateChange(state) {
+		ttsState = state;
+		refreshCallState();
+	},
+});
+
+function setStatus(text) {
+	statusEl.textContent = text;
+}
+
+function setConn(text) {
+	connEl.textContent = text;
+}
+
+function setVAD(active, text) {
+	vadDotEl.classList.toggle("active", active);
+	vadTextEl.textContent = text;
+}
+
+function refreshCallState() {
+	if (!callActive) {
+		return;
+	}
+
+	if (userSpeaking) {
+		setStatus("Listening");
+		setVAD(true, "Voice detected");
+		return;
+	}
+
+	if (processingTurn) {
+		setStatus("Processing");
+		setVAD(false, "Processing");
+		return;
+	}
+
+	if (ttsState.playing || ttsState.queued) {
+		setStatus("Speaking");
+		setVAD(false, "Assistant speaking");
+		return;
+	}
+
+	if (agentStreaming) {
+		setStatus("Generating response");
+		setVAD(false, "Assistant responding");
+		return;
+	}
+
+	setStatus("Listening");
+	setVAD(false, "Waiting for speech");
+}
+
+function addMessage(role, text) {
+	const wrapper = document.createElement("div");
+	wrapper.className = `message ${role}`;
+	const label = document.createElement("small");
+	label.textContent = role.startsWith("user") ? "Caller" : "IST Agent";
+	const body = document.createElement("div");
+	body.textContent = text;
+	wrapper.append(label, body);
+	logEl.append(wrapper);
+	logEl.scrollTop = logEl.scrollHeight;
+	return body;
+}
+
+function clearInterimMessage() {
+	if (!interimEl) return;
+	interimEl.closest(".message")?.remove();
+	interimEl = null;
+}
+
+function ensureInterimMessage() {
+	if (!interimEl) interimEl = addMessage("user interim", "…");
+	return interimEl;
+}
+
+function ensureBotStreamingMessage() {
+	if (!botStreamingEl) botStreamingEl = addMessage("bot", "");
+	return botStreamingEl;
+}
+
+function handleServerEvent(event) {
+	switch (event.type) {
+		case "ready":
+			userSpeaking = false;
+			processingTurn = false;
+			agentStreaming = false;
+			refreshCallState();
+			break;
+
+		case "speech_started":
+			ttsPlayer.stopReply();
+			userSpeaking = true;
+			processingTurn = false;
+			ensureInterimMessage();
+			refreshCallState();
+			break;
+
+		case "transcript_interim":
+			if (event.text) {
+				ensureInterimMessage().textContent = event.text;
+				logEl.scrollTop = logEl.scrollHeight;
+			}
+			break;
+
+		case "speech_ended":
+			clearInterimMessage();
+			userSpeaking = false;
+			processingTurn = true;
+			refreshCallState();
+			break;
+
+		case "transcript":
+			clearInterimMessage();
+			userSpeaking = false;
+			processingTurn = true;
+			if (event.text) addMessage("user", event.text);
+			refreshCallState();
+			break;
+
+		case "agent_started":
+			processingTurn = false;
+			agentStreaming = true;
+			refreshCallState();
+			break;
+
+		case "agent_delta":
+			if (event.text) {
+				ensureBotStreamingMessage().textContent += event.text;
+				logEl.scrollTop = logEl.scrollHeight;
+			}
+			break;
+
+		case "agent_text":
+			if (event.text) ensureBotStreamingMessage().textContent = event.text;
+			break;
+
+		case "agent_done":
+			agentStreaming = false;
+			botStreamingEl = null;
+			refreshCallState();
+			break;
+
+		case "tts_started":
+			ttsPlayer.startReply(event.reply_id, event.sample_rate);
+			break;
+
+		case "tts_chunk":
+			ttsPlayer.appendChunk(event.reply_id, event.audio);
+			break;
+
+		case "tts_done":
+			ttsPlayer.finishReply(event.reply_id);
+			break;
+
+		case "tts_stopped":
+			ttsPlayer.stopReply(event.reply_id);
+			refreshCallState();
+			break;
+
+		case "tts_error":
+			ttsPlayer.stopReply(event.reply_id);
+			setStatus(`TTS error: ${event.msg || "unknown"}`);
+			setVAD(false, "Waiting for speech");
+			break;
+
+		case "agent_error":
+			agentStreaming = false;
+			processingTurn = false;
+			ttsPlayer.stopReply();
+			botStreamingEl = null;
+			setStatus(`Agent error: ${event.msg || "unknown"}`);
+			setVAD(false, "Waiting for speech");
+			break;
+
+		case "error":
+			setStatus(`Error: ${event.msg || "unknown"}`);
+			break;
+
+		default:
+			break;
+	}
+}
+
+async function startCall() {
+	dialBtn.disabled = true;
+	setStatus("Starting...");
+	setConn("Connecting");
+
+	try {
+		audioCtx = new AudioContext({ sampleRate: 48000 });
+		await audioCtx.resume();
+		ttsPlayer.bindContext(audioCtx);
+
+		micStream = await navigator.mediaDevices.getUserMedia({
+			audio: {
+				channelCount: 1,
+				sampleRate: 48000,
+				echoCancellation: true,
+				noiseSuppression: true,
+				autoGainControl: true,
+			},
+		});
+
+		const blobUrl = URL.createObjectURL(
+			new Blob([WORKLET_CODE], { type: "application/javascript" })
+		);
+		await audioCtx.audioWorklet.addModule(blobUrl);
+		URL.revokeObjectURL(blobUrl);
+
+		workletNode = new AudioWorkletNode(audioCtx, "mic-proc");
+		audioCtx.createMediaStreamSource(micStream).connect(workletNode);
+
+		const proto = location.protocol === "https:" ? "wss" : "ws";
+		ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+		ws.onopen = () => {
+			callActive = true;
+			userSpeaking = false;
+			processingTurn = false;
+			agentStreaming = false;
+			clearInterimMessage();
+			botStreamingEl = null;
+			ttsPlayer.stopReply();
+			hangBtn.disabled = false;
+			setConn("Connected");
+			refreshCallState();
+
+			workletNode.port.onmessage = ({ data }) => {
+				if (!callActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+				const { buf } = data;
+				ws.send(buf);
 			};
+		};
 
-			recognition.onerror = (event) => {
-				setStatus(`Speech recognition error: ${event.error}`);
-			};
-
-			recognition.onend = () => {
-				recognitionRunning = false;
-				// Only restart when bot is NOT speaking — VAD handles the barge-in interrupt
-				if (callActive && !botSpeaking) {
-					startRecognition();
-				} else if (!callActive) {
-					setStatus("Call ended");
-				}
-			};
-		}
-
-		function appendMessage(role, text) {
-			const message = document.createElement("div");
-			message.className = `message ${role}`;
-
-			const label = document.createElement("small");
-			label.innerText = role === "user" ? "Caller" : "IST Agent";
-
-			const body = document.createElement("div");
-			body.innerText = text;
-
-			message.appendChild(label);
-			message.appendChild(body);
-			transcriptListEl.appendChild(message);
-			transcriptListEl.scrollTop = transcriptListEl.scrollHeight;
-
-			return body;
-		}
-
-		function beginBotStreamMessage() {
-			activeBotBodyEl = appendMessage("bot", "");
-		}
-
-		function appendBotStreamDelta(text) {
-			if (!activeBotBodyEl) {
-				beginBotStreamMessage();
-			}
-			activeBotBodyEl.innerText += text;
-			transcriptListEl.scrollTop = transcriptListEl.scrollHeight;
-		}
-
-		function endBotStreamMessage() {
-			activeBotBodyEl = null;
-		}
-
-		function setVAD(active, text) {
-			if (lastVadActive !== active) {
-				lastVadActive = active;
-				vadDotEl.classList.toggle("active", active);
-			}
-			if (lastVadText !== text) {
-				lastVadText = text;
-				vadTextEl.innerText = text;
-			}
-		}
-
-		async function startVAD() {
-			if (micStream) {
-				return;
-			}
-
-			// echoCancellation removes bot TTS from the mic signal so VAD only sees the user's voice
-			micStream = await navigator.mediaDevices.getUserMedia({
-				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-			});
-			audioContext = new AudioContext();
-			const source = audioContext.createMediaStreamSource(micStream);
-			analyser = audioContext.createAnalyser();
-			analyser.fftSize = 2048;
-			analyser.smoothingTimeConstant = 0.86;
-			source.connect(analyser);
-
-			const data = new Uint8Array(analyser.fftSize);
-			const freqData = new Uint8Array(analyser.frequencyBinCount);
-			const nyquist = audioContext.sampleRate / 2;
-			const lowBin = Math.max(1, Math.floor((SPEECH_BAND_MIN_HZ / nyquist) * analyser.frequencyBinCount));
-			const highBin = Math.min(analyser.frequencyBinCount - 1, Math.ceil((SPEECH_BAND_MAX_HZ / nyquist) * analyser.frequencyBinCount));
-
-			const tick = () => {
-				if (!analyser) {
-					return;
-				}
-
-				analyser.getByteTimeDomainData(data);
-				analyser.getByteFrequencyData(freqData);
-				let sum = 0;
-				for (let i = 0; i < data.length; i += 1) {
-					const value = (data[i] - 128) / 128;
-					sum += value * value;
-				}
-				const rms = Math.sqrt(sum / data.length);
-				let totalEnergy = 0;
-				let speechBandEnergy = 0;
-				for (let i = 1; i < freqData.length; i += 1) {
-					const energy = freqData[i];
-					totalEnergy += energy;
-					if (i >= lowBin && i <= highBin) {
-						speechBandEnergy += energy;
-					}
-				}
-				const speechRatio = totalEnergy > 0 ? speechBandEnergy / totalEnergy : 0;
-
-				const baseGate = Math.max(MIN_RMS_GATE, noiseFloorRms * 2.8);
-				const dynamicGate = botSpeaking ? baseGate * 1.25 : baseGate;
-				const isSpeechLike = rms > dynamicGate && speechRatio > SPEECH_RATIO_GATE;
-
-				if (isSpeechLike) {
-					speechFrames += 1;
-					silenceFrames = 0;
-				} else {
-					silenceFrames += 1;
-					speechFrames = 0;
-					const adaptRate = botSpeaking ? 0.01 : NOISE_ADAPT_RATE;
-					noiseFloorRms = (noiseFloorRms * (1 - adaptRate)) + (rms * adaptRate);
-				}
-
-				if (speechFrames >= SPEECH_START_FRAMES) {
-					setVAD(true, "Voice detected");
-
-					// Mid-answer barge-in trigger with robust speech gating.
-					if (botSpeaking && callActive) {
-						speechFrames = 0;
-						stopBotSpeech();
-						setStatus("Listening");
-						if (recognitionRunning) {
-							recognition.abort();
-						} else {
-							startRecognition();
-						}
-					}
-				}
-
-				if (silenceFrames >= SPEECH_END_FRAMES) {
-					if (callActive) {
-						setVAD(false, "Listening for speech");
-					} else {
-						setVAD(false, "Waiting");
-					}
-				}
-
-				vadFrame = requestAnimationFrame(tick);
-			};
-
-			speechFrames = 0;
-			silenceFrames = 0;
-			noiseFloorRms = 0.01;
-			setVAD(false, "Listening for speech");
-			vadFrame = requestAnimationFrame(tick);
-		}
-
-		function stopVAD() {
-			if (vadFrame) {
-				cancelAnimationFrame(vadFrame);
-				vadFrame = null;
-			}
-			if (micStream) {
-				micStream.getTracks().forEach((track) => track.stop());
-				micStream = null;
-			}
-			if (audioContext) {
-				audioContext.close();
-				audioContext = null;
-			}
-			analyser = null;
-			setVAD(false, "Waiting");
-		}
-
-		function startRecognition() {
-			// Guard botSpeaking: Chrome blocks recognition during TTS anyway; VAD handles interrupt
-			if (!recognition || recognitionRunning || !callActive || botSpeaking) {
-				return;
-			}
+		ws.onmessage = ({ data }) => {
 			try {
-				recognition.start();
-			} catch (_error) {
-				// Browser can throw if start is called while already active.
+				handleServerEvent(JSON.parse(data));
+			} catch (_) {
+				// no-op
 			}
+		};
+
+		ws.onerror = () => {
+			setConn("Error");
+			setStatus("Connection error");
+			endCall({ preserveError: true });
+		};
+
+		ws.onclose = () => {
+			if (callActive) endCall();
+		};
+	} catch (error) {
+		setStatus(`Could not start: ${error.message}`);
+		setConn("Disconnected");
+		cleanup();
+		dialBtn.disabled = false;
+	}
+}
+
+function endCall(options = {}) {
+	const preserveError = Boolean(options.preserveError);
+	callActive = false;
+	userSpeaking = false;
+	processingTurn = false;
+	agentStreaming = false;
+	clearInterimMessage();
+	botStreamingEl = null;
+	ttsPlayer.stopReply();
+	if (ws && ws.readyState === WebSocket.OPEN) {
+		ws.send(JSON.stringify({ type: "hangup" }));
+	}
+	cleanup();
+	if (!preserveError) {
+		setStatus("Idle");
+	}
+	setConn("Disconnected");
+	setVAD(false, "Waiting");
+	dialBtn.disabled = false;
+	hangBtn.disabled = true;
+}
+
+function cleanup() {
+	if (workletNode) {
+		try {
+			workletNode.disconnect();
+		} catch (_) {
+			// no-op
 		}
+		workletNode = null;
+	}
 
-		function stopRecognition() {
-			if (!recognition || !recognitionRunning) {
-				return;
-			}
-			recognition.stop();
+	if (micStream) {
+		micStream.getTracks().forEach((track) => track.stop());
+		micStream = null;
+	}
+
+	if (audioCtx) {
+		audioCtx.close().catch(() => {});
+		audioCtx = null;
+	}
+
+	ttsPlayer.dispose();
+
+	if (ws) {
+		try {
+			ws.close();
+		} catch (_) {
+			// no-op
 		}
+		ws = null;
+	}
+}
 
-		function stopBotSpeech() {
-			ttsQueue = [];
-			streamTextBuffer = "";
-			botSpeaking = false;
-			speechSynthesis.cancel();
-		}
-
-		function pumpSpeechQueue() {
-			if (!callActive) {
-				return;
-			}
-			if (botSpeaking || ttsQueue.length === 0) {
-				if (!botSpeaking && ttsQueue.length === 0) {
-					setStatus("Listening");
-					startRecognition();
-				}
-				return;
-			}
-
-			const chunk = ttsQueue.shift();
-			if (!chunk.trim()) {
-				pumpSpeechQueue();
-				return;
-			}
-
-			botSpeaking = true;
-			speechFrames = 0;
-			silenceFrames = 0;
-			stopRecognition();
-			setStatus("Speaking");
-
-			const utterance = new SpeechSynthesisUtterance(chunk);
-			utterance.onend = () => {
-				if (!botSpeaking) {
-					return;
-				}
-				botSpeaking = false;
-				pumpSpeechQueue();
-			};
-			utterance.onerror = () => {
-				botSpeaking = false;
-				pumpSpeechQueue();
-			};
-			speechSynthesis.speak(utterance);
-		}
-
-		function queueSpeech(text) {
-			if (!text || !text.trim()) {
-				return;
-			}
-			ttsQueue.push(text.trim());
-			pumpSpeechQueue();
-		}
-
-		function flushStreamText(force = false) {
-			if (!streamTextBuffer) {
-				return;
-			}
-
-			const sentenceRegex = /.+?[.!?](?:\s+|$)/g;
-			let match;
-			let consumed = 0;
-			while ((match = sentenceRegex.exec(streamTextBuffer)) !== null) {
-				const sentence = match[0].trim();
-				if (sentence) {
-					queueSpeech(sentence);
-				}
-				consumed = sentenceRegex.lastIndex;
-			}
-
-			if (consumed > 0) {
-				streamTextBuffer = streamTextBuffer.slice(consumed);
-			}
-
-			if (force && streamTextBuffer.trim()) {
-				queueSpeech(streamTextBuffer.trim());
-				streamTextBuffer = "";
-			}
-		}
-
-		function connectWebSocket() {
-			return new Promise((resolve, reject) => {
-				ws = new WebSocket(wsUrl);
-
-				ws.onopen = () => {
-					setConnectionState("Connected");
-					resolve();
-				};
-
-				ws.onmessage = (event) => {
-					let payload = null;
-					try {
-						payload = JSON.parse(event.data);
-					} catch (_error) {
-						payload = null;
-					}
-
-					if (!payload || !payload.type) {
-						appendMessage("bot", event.data);
-						queueSpeech(event.data);
-						return;
-					}
-
-					if (payload.type === "stream_start") {
-						streamTextBuffer = "";
-						beginBotStreamMessage();
-						return;
-					}
-
-					if (payload.type === "stream_delta") {
-						const delta = payload.text || "";
-						if (!delta) {
-							return;
-						}
-						appendBotStreamDelta(delta);
-						streamTextBuffer += delta;
-						flushStreamText(false);
-						return;
-					}
-
-					if (payload.type === "stream_end") {
-						flushStreamText(true);
-						endBotStreamMessage();
-					}
-				};
-
-				ws.onerror = () => {
-					setConnectionState("Error");
-					setStatus("WebSocket error");
-					reject(new Error("WebSocket error"));
-				};
-
-				ws.onclose = () => {
-					setConnectionState("Disconnected");
-					if (callActive) {
-						setStatus("Connection closed");
-						endCall();
-					}
-				};
-			});
-		}
-
-		async function startCall() {
-			if (callActive) {
-				return;
-			}
-
-			try {
-				callActive = true;
-				dialBtn.disabled = true;
-				hangupBtn.disabled = false;
-				setStatus("Starting call");
-				setConnectionState("Connecting");
-
-				await startVAD();
-				await connectWebSocket();
-			} catch (error) {
-				setStatus("Unable to start call");
-				setConnectionState("Disconnected");
-				callActive = false;
-				dialBtn.disabled = false;
-				hangupBtn.disabled = true;
-				stopVAD();
-			}
-		}
-
-		function endCall() {
-			callActive = false;
-			stopBotSpeech();
-			endBotStreamMessage();
-			stopRecognition();
-			stopVAD();
-			if (ws && ws.readyState === WebSocket.OPEN) {
-				ws.close();
-			}
-			ws = null;
-			setStatus("Idle");
-			setConnectionState("Disconnected");
-			dialBtn.disabled = false;
-			hangupBtn.disabled = true;
-		}
-
-		dialBtn.addEventListener("click", startCall);
-		hangupBtn.addEventListener("click", endCall);
-	</script>
+dialBtn.addEventListener("click", startCall);
+hangBtn.addEventListener("click", endCall);
+</script>
 </body>
 </html>

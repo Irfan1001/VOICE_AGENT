@@ -1,109 +1,32 @@
-import uuid
-import json
-from pathlib import Path
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import logging
+from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
-from openai import OpenAI
 
-from backend.rag import search
+from backend.config import settings
+from backend.llm import LLMResponder
+from backend.stt import STTSession
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+logger = logging.getLogger("ist_voice_agent")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
-client = OpenAI()
-
-sessions = {}
-SYSTEM_PROMPT = """You are the IST University voice assistant.
-Your role is to help students and parents with admissions, fee structure, programs, campus life, and all IST-related queries.
-
-Guidelines:
-1. Answer using ONLY information from the provided KB context. Never invent or guess facts.
-2. If the context contains a clear answer, respond concisely and helpfully.
-3. If the context partially covers the question, answer what you can and note what is not covered.
-4. If the question is ambiguous or unclear, ask the user to rephrase or clarify before saying you don't know.
-5. Only if the topic is genuinely absent from the KB after doing your best, say: "I don't have specific information on that right now. I can help connect you to a human agent if you'd like."
-6. Keep responses short and conversational — suitable for voice output. Avoid bullet lists.
-"""
-WELCOME_MESSAGE = "Welcome to IST University. How may I help you today?"
-
-
-
-def get_history(session_id):
-	return sessions.get(session_id, [])
-
-
-def save_message(session_id, role, content):
-	sessions.setdefault(session_id, []).append({"role": role, "content": content})
-	# Keep only recent history to avoid prompt bloat and latency spikes.
-	if len(sessions[session_id]) > 13:
-		sessions[session_id] = [sessions[session_id][0], *sessions[session_id][-12:]]
+llm_responder = LLMResponder(settings)
 
 
 @app.get("/health")
-def health():
-	return {"status": "ok"}
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-	await ws.accept()
-
-	session_id = str(uuid.uuid4())
-	sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-	await ws.send_text(WELCOME_MESSAGE)
-	save_message(session_id, "assistant", WELCOME_MESSAGE)
-
-	try:
-		while True:
-			question = await ws.receive_text()
-			context = search(question, k=6)
-
-			user_prompt = f"""
-Answer only from context.
-If the user asks about a person and their name appears in context, provide their role/affiliation from context.
-If context is insufficient, ask a short clarification question.
-
-Context:
-{context}
-
-Question:
-{question}
-"""
-
-			# Inject retrieval context only for the current turn (do not persist it in chat history).
-			messages = [
-				*get_history(session_id),
-				{"role": "user", "content": user_prompt},
-			]
-
-			response = client.chat.completions.create(
-				model="gpt-4o-mini",
-				messages=messages,
-				temperature=0.2,
-				max_tokens=220,
-				stream=True,
-			)
-
-			await ws.send_text(json.dumps({"type": "stream_start"}))
-			parts = []
-			for chunk in response:
-				delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
-				if not delta:
-					continue
-				parts.append(delta)
-				await ws.send_text(json.dumps({"type": "stream_delta", "text": delta}))
-			await ws.send_text(json.dumps({"type": "stream_end"}))
-
-			answer = "".join(parts).strip() or "I could not generate an answer."
-
-			save_message(session_id, "user", question)
-			save_message(session_id, "assistant", answer)
-	except WebSocketDisconnect:
-		sessions.pop(session_id, None)
+async def ws_endpoint(ws: WebSocket) -> None:
+    await ws.accept()
+    session = STTSession(ws, settings, llm_responder=llm_responder)
+    try:
+        await session.run()
+    finally:
+        await session.close()
 
 
-# Serve the frontend — must be mounted AFTER all API/WebSocket routes.
-_frontend_dir = Path(__file__).resolve().parents[1] / "frontend"
-app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+app.mount("/", StaticFiles(directory=str(settings.frontend_dir), html=True), name="frontend")

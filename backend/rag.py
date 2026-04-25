@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import json
 import re
 from pathlib import Path
@@ -191,6 +192,19 @@ def extract_name_query_tokens(query: str):
 	return tokens
 
 
+def has_fuzzy_name_match(name_tokens, chunk_tokens) -> bool:
+	if not name_tokens:
+		return False
+
+	for token in name_tokens:
+		if token in chunk_tokens:
+			continue
+		best = max((difflib.SequenceMatcher(None, token, cand).ratio() for cand in chunk_tokens), default=0.0)
+		if best < 0.78:
+			return False
+	return True
+
+
 def build_index(source: str = "auto"):
 	texts, selected_source = load_source_chunks(source)
 
@@ -236,7 +250,8 @@ def search(query, k: int = 3):
 		vector_rank_score = 1.0 / (rank + 1)
 		overlap = len(query_tokens & chunk_tokens) / max(len(query_tokens), 1)
 		name_bonus = 1.0 if name_tokens and all(tok in chunk_l for tok in name_tokens) else 0.0
-		score = vector_rank_score + (1.5 * overlap) + (1.0 * name_bonus)
+		fuzzy_name_bonus = 0.8 if has_fuzzy_name_match(name_tokens, chunk_tokens) else 0.0
+		score = vector_rank_score + (1.5 * overlap) + (1.0 * name_bonus) + fuzzy_name_bonus
 		rescored.append((score, chunk))
 
 	rescored.sort(key=lambda x: x[0], reverse=True)
@@ -251,7 +266,7 @@ def search(query, k: int = 3):
 		if len(selected) >= k:
 			break
 
-	return "\n\n".join(selected)
+	return "\n\n".join(selected[:2])
 
 
 if __name__ == "__main__":
