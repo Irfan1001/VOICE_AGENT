@@ -63,11 +63,11 @@ settings = Settings(
         "LLM_SYSTEM_PROMPT",
         "You are the IST University voice assistant. Answer clearly, briefly, and helpfully. For generic questions like 'Can you hear me?' or 'Are you there?', respond conversationally (e.g., 'Yes, I can hear you. How can I help?'). For IST-specific questions, use the knowledge base context provided. Avoid saying 'I don't have that information' unless absolutely necessary.",
     ),
-    rag_top_k=int(os.getenv("RAG_TOP_K", "3")),
+    rag_top_k=int(os.getenv("RAG_TOP_K", "5")),
     deepgram_language=os.getenv("DEEPGRAM_LANGUAGE", "en-US"),
     sample_rate=int(os.getenv("SAMPLE_RATE", "48000")),
     utterance_end_grace_ms=int(os.getenv("UTTERANCE_END_GRACE_MS", "300")),
-    utterance_end_ms=int(os.getenv("UTTERANCE_END_MS", "2000")),  # 2s silence to confirm full utterance before finalizing
+    utterance_end_ms=int(os.getenv("UTTERANCE_END_MS", "1500")),  # 1.2s silence to confirm full utterance before finalizing
     turn_silence_ms=int(os.getenv("TURN_SILENCE_MS", "500")),   # Wait after UtteranceEnd before sending to LLM (short, since utterance_end_ms already waited)
     deepgram_idle_keepalive_seconds=float(os.getenv("DEEPGRAM_IDLE_KEEPALIVE_SECONDS", "3")),
     vad_min_confidence=float(os.getenv("VAD_MIN_CONFIDENCE", "0.5")),  # Increased from 0.4 to filter noise better

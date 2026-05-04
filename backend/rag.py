@@ -184,6 +184,12 @@ def tokenize_for_match(text: str):
 	]
 
 
+def query_ngrams(tokens: list[str], n: int = 2) -> set[str]:
+	if len(tokens) < n:
+		return set()
+	return {" ".join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)}
+
+
 def extract_name_query_tokens(query: str):
 	tokens = tokenize_for_match(query)
 	# For person lookup, keep 2-4 most specific tokens (e.g., benish amin).
@@ -203,6 +209,23 @@ def has_fuzzy_name_match(name_tokens, chunk_tokens) -> bool:
 		if best < 0.78:
 			return False
 	return True
+
+
+def heuristic_score(
+	query_tokens: set[str],
+	name_tokens: list[str],
+	chunk: str,
+	vector_rank: int,
+) -> float:
+	chunk_l = chunk.lower()
+	chunk_tokens = set(tokenize_for_match(chunk))
+
+	# Vector rank score is stable regardless of embedding distance scale.
+	vector_rank_score = 1.0 / (vector_rank + 1)
+	overlap = len(query_tokens & chunk_tokens) / max(len(query_tokens), 1)
+	name_bonus = 1.0 if name_tokens and all(tok in chunk_l for tok in name_tokens) else 0.0
+	fuzzy_name_bonus = 0.8 if has_fuzzy_name_match(name_tokens, chunk_tokens) else 0.0
+	return vector_rank_score + (1.5 * overlap) + (1.0 * name_bonus) + fuzzy_name_bonus
 
 
 def build_index(source: str = "auto"):
@@ -232,10 +255,12 @@ def search(query, k: int = 3):
 
 	texts = payload["chunks"] if isinstance(payload, dict) else payload
 	q_emb = embed([query])[0]
-	candidate_k = min(max(k * 8, 30), len(texts))
+	candidate_k = min(max(k * 16, 80), len(texts))
 	distances, indices = index.search(np.array([q_emb]).astype("float32"), k=candidate_k)
 
-	query_tokens = set(tokenize_for_match(query))
+	query_tokens_list = tokenize_for_match(query)
+	query_tokens = set(query_tokens_list)
+	query_bigrams = query_ngrams(query_tokens_list, n=2)
 	name_tokens = extract_name_query_tokens(query)
 
 	rescored = []
@@ -243,22 +268,15 @@ def search(query, k: int = 3):
 		if not (0 <= idx < len(texts)):
 			continue
 		chunk = texts[idx]
-		chunk_l = chunk.lower()
-		chunk_tokens = set(tokenize_for_match(chunk))
-
-		# Vector rank score is stable regardless of embedding distance scale.
-		vector_rank_score = 1.0 / (rank + 1)
-		overlap = len(query_tokens & chunk_tokens) / max(len(query_tokens), 1)
-		name_bonus = 1.0 if name_tokens and all(tok in chunk_l for tok in name_tokens) else 0.0
-		fuzzy_name_bonus = 0.8 if has_fuzzy_name_match(name_tokens, chunk_tokens) else 0.0
-		score = vector_rank_score + (1.5 * overlap) + (1.0 * name_bonus) + fuzzy_name_bonus
+		score = heuristic_score(query_tokens, name_tokens, chunk, rank)
 		rescored.append((score, chunk))
 
 	rescored.sort(key=lambda x: x[0], reverse=True)
+
 	selected = []
 	seen = set()
 	for _, chunk in rescored:
-		trimmed = chunk[:950]
+		trimmed = chunk[:1400]
 		if trimmed in seen:
 			continue
 		seen.add(trimmed)
@@ -266,7 +284,7 @@ def search(query, k: int = 3):
 		if len(selected) >= k:
 			break
 
-	return "\n\n".join(selected[:2])
+	return "\n\n".join(selected[:k])
 
 
 if __name__ == "__main__":

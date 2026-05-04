@@ -1,0 +1,346 @@
+{
+  "input": "data\\KB.txt",
+  "output": "data\\KB_restructured_auto.txt",
+  "section_count": 22,
+  "buckets": {
+    "programs": 4,
+    "fees": 1,
+    "admissions": 4,
+    "campus": 2,
+    "contacts": 7,
+    "research": 3,
+    "reference": 1
+  },
+  "decisions": [
+    {
+      "order": 0,
+      "title": "ADMISSION FAQs COMPLETE",
+      "bucket": "admissions",
+      "scores": {
+        "programs": 6,
+        "fees": 0,
+        "admissions": 15,
+        "scholarships": 0,
+        "campus": 1,
+        "contacts": 0,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 1,
+      "title": "FEE STRUCTURE",
+      "bucket": "fees",
+      "scores": {
+        "programs": 3,
+        "fees": 8,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 3,
+        "contacts": 0,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 2,
+      "title": "MERIT / AGGREGATE CALCULATION",
+      "bucket": "admissions",
+      "scores": {
+        "programs": 3,
+        "fees": 0,
+        "admissions": 9,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 0,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 3,
+      "title": "PROGRAMS OFFERED",
+      "bucket": "programs",
+      "scores": {
+        "programs": 13,
+        "fees": 0,
+        "admissions": 2,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 0,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 4,
+      "title": "ELIGIBILITY CRITERIA",
+      "bucket": "admissions",
+      "scores": {
+        "programs": 0,
+        "fees": 0,
+        "admissions": 5,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 0,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 5,
+      "title": "HARASSMENT COMPLAINT CELL (HCC)",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 0,
+        "fees": 1,
+        "admissions": 2,
+        "scholarships": 1,
+        "campus": 0,
+        "contacts": 12,
+        "research": 1,
+        "reference": 0
+      }
+    },
+    {
+      "order": 6,
+      "title": "HEADS OF DEPARTMENT (HOD)",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 1,
+        "fees": 0,
+        "admissions": 0,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 4,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 7,
+      "title": "VICE CHANCELLOR",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 0,
+        "fees": 0,
+        "admissions": 0,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 10,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 8,
+      "title": "NCFA DIRECTOR",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 0,
+        "fees": 0,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 9,
+        "research": 1,
+        "reference": 0
+      }
+    },
+    {
+      "order": 9,
+      "title": "NCGSA",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 0,
+        "fees": 0,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 4,
+        "research": 2,
+        "reference": 0
+      }
+    },
+    {
+      "order": 10,
+      "title": "SUPARCO",
+      "bucket": "research",
+      "scores": {
+        "programs": 1,
+        "fees": 0,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 0,
+        "research": 2,
+        "reference": 0
+      }
+    },
+    {
+      "order": 11,
+      "title": "TRANSPORT FACILITY",
+      "bucket": "campus",
+      "scores": {
+        "programs": 0,
+        "fees": 0,
+        "admissions": 0,
+        "scholarships": 0,
+        "campus": 5,
+        "contacts": 0,
+        "research": 1,
+        "reference": 0
+      }
+    },
+    {
+      "order": 12,
+      "title": "OFFICE TIMINGS",
+      "bucket": "campus",
+      "scores": {
+        "programs": 0,
+        "fees": 0,
+        "admissions": 0,
+        "scholarships": 0,
+        "campus": 9,
+        "contacts": 0,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 13,
+      "title": "RESEARCH CENTRES AND LABS",
+      "bucket": "research",
+      "scores": {
+        "programs": 1,
+        "fees": 0,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 2,
+        "research": 17,
+        "reference": 1
+      }
+    },
+    {
+      "order": 14,
+      "title": "QUALITY ENHANCEMENT CELL 2012",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 2,
+        "fees": 1,
+        "admissions": 0,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 4,
+        "research": 4,
+        "reference": 0
+      }
+    },
+    {
+      "order": 15,
+      "title": "CONTACTS AND KEY PERSONNEL",
+      "bucket": "contacts",
+      "scores": {
+        "programs": 0,
+        "fees": 1,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 1,
+        "contacts": 14,
+        "research": 0,
+        "reference": 0
+      }
+    },
+    {
+      "order": 16,
+      "title": "FACULTY AND PROGRAMS BY DEPARTMENT",
+      "bucket": "programs",
+      "scores": {
+        "programs": 20,
+        "fees": 0,
+        "admissions": 0,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 0,
+        "research": 2,
+        "reference": 0
+      }
+    },
+    {
+      "order": 17,
+      "title": "PROGRAMS AND ADMISSIONS DATA",
+      "bucket": "programs",
+      "scores": {
+        "programs": 16,
+        "fees": 3,
+        "admissions": 15,
+        "scholarships": 4,
+        "campus": 2,
+        "contacts": 0,
+        "research": 3,
+        "reference": 1
+      }
+    },
+    {
+      "order": 18,
+      "title": "NEWS AND EVENTS",
+      "bucket": "research",
+      "scores": {
+        "programs": 6,
+        "fees": 2,
+        "admissions": 3,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 1,
+        "research": 11,
+        "reference": 0
+      }
+    },
+    {
+      "order": 19,
+      "title": "DETAILED IST KNOWLEDGE BASE",
+      "bucket": "programs",
+      "scores": {
+        "programs": 3,
+        "fees": 0,
+        "admissions": 1,
+        "scholarships": 0,
+        "campus": 2,
+        "contacts": 1,
+        "research": 2,
+        "reference": 0
+      }
+    },
+    {
+      "order": 20,
+      "title": "IST WEBSITE FULL CONTENT",
+      "bucket": "reference",
+      "scores": {
+        "programs": 6,
+        "fees": 0,
+        "admissions": 2,
+        "scholarships": 0,
+        "campus": 0,
+        "contacts": 1,
+        "research": 3,
+        "reference": 9
+      }
+    },
+    {
+      "order": 21,
+      "title": "KICSIT DIRECTOR & MERIT SCHOLARSHIPS (VOICE FAQ)",
+      "bucket": "admissions",
+      "scores": {
+        "programs": 5,
+        "fees": 1,
+        "admissions": 11,
+        "scholarships": 8,
+        "campus": 1,
+        "contacts": 5,
+        "research": 1,
+        "reference": 1
+      }
+    }
+  ]
+}

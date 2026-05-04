@@ -5,3 +5,4 @@ openai
 numpy
 python-dotenv
 websockets
+cachetools

@@ -8,6 +8,18 @@ import time
 from typing import Any
 from urllib.parse import urlencode
 
+# Matches a sentence boundary: ./?/! followed by whitespace (for mid-stream splitting)
+_SENT_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+# Timestamp logging for event ordering
+import time as time_module
+def _ts_log(logger_obj: logging.Logger, event: str, details: str = "") -> None:
+    ts_ms = int(time_module.time() * 1000) % 100000
+    msg = f"[TS={ts_ms:>5}ms] {event}"
+    if details:
+        msg += f" | {details}"
+    logger_obj.info(msg)
+
 from fastapi import WebSocket, WebSocketDisconnect
 import websockets
 
@@ -39,26 +51,32 @@ class STTSession:
         self.deepgram_task: asyncio.Task[None] | None = None
         self.deepgram_keepalive_task: asyncio.Task[None] | None = None
         self.pending_finalize_task: asyncio.Task[None] | None = None
-        self.turn_finalize_task: asyncio.Task[None] | None = None
         self.llm_worker_task: asyncio.Task[None] | None = None
         self.pending_llm_requests: asyncio.Queue[str] = asyncio.Queue()
         self.last_audio_sent_at = time.monotonic()
         self.utterance_parts: list[str] = []
         self.latest_transcript = ""
-        self.turn_parts: list[str] = []
         self.pending_speech_start = False
         self.speech_votes = 0
         self.user_speaking = False
         self.closed = False
         self.reply_counter = 0
+        self.reply_id_lock = asyncio.Lock()
+        # Conversation history: list of {role, content} dicts, capped at _MAX_HISTORY_TURNS pairs
+        self._conversation_history: list[dict[str, str]] = []
+        self._MAX_HISTORY_TURNS = 6  # max (user+assistant) pairs kept
+
+    async def _next_reply_id(self) -> int:
+        async with self.reply_id_lock:
+            self.reply_counter += 1
+            return self.reply_counter
 
     async def speak_agent_text(self, text: str) -> None:
         message = text.strip()
         if not message:
             return
 
-        self.reply_counter += 1
-        reply_id = self.reply_counter
+        reply_id = await self._next_reply_id()
         await self.send_json({"type": "agent_started"})
         await self.send_json({"type": "agent_text", "text": message})
         await self.tts_responder.stream_reply(reply_id, message)
@@ -92,11 +110,6 @@ class STTSession:
             self.pending_finalize_task.cancel()
         self.pending_finalize_task = None
 
-    def cancel_turn_finalize(self) -> None:
-        if self.turn_finalize_task and not self.turn_finalize_task.done():
-            self.turn_finalize_task.cancel()
-        self.turn_finalize_task = None
-
     async def finalize_utterance(self) -> None:
         self.user_speaking = False
         self.pending_speech_start = False
@@ -106,22 +119,9 @@ class STTSession:
         self.latest_transcript = ""
         await self.send_json({"type": "speech_ended"})
         if segment:
-            self.turn_parts.append(segment)
-        # Start/reset the turn silence timer — emit combined transcript after turn_silence_ms
-        self.cancel_turn_finalize()
-        self.turn_finalize_task = asyncio.create_task(self._emit_turn())
-
-    async def _emit_turn(self) -> None:
-        """Wait for turn_silence_ms of silence then emit the full combined transcript."""
-        await asyncio.sleep(self.settings.turn_silence_ms / 1000)
-        if not self.turn_parts:
-            return
-        full_text = " ".join(self.turn_parts).strip()
-        self.turn_parts.clear()
-        if full_text:
-            await self.send_json({"type": "transcript", "text": full_text})
+            await self.send_json({"type": "transcript", "text": segment})
             if self.llm_responder is not None:
-                await self.pending_llm_requests.put(full_text)
+                await self.pending_llm_requests.put(segment)
 
     async def llm_worker(self) -> None:
         try:
@@ -135,22 +135,67 @@ class STTSession:
                 await self.send_json({"type": "agent_started"})
                 try:
                     full_reply = ""
-                    self.reply_counter += 1
-                    reply_id = self.reply_counter
+                    reply_id = await self._next_reply_id()
+                    # Start TTS pipeline immediately — first sentence will begin playing
+                    # before LLM finishes generating the rest.
+                    await self.tts_responder.begin_streaming_reply(reply_id)
+                    _ts_log(logger, "TTS_BEGIN_STREAMING", f"reply_id={reply_id}")
+
                     if self.llm_responder is not None:
-                        async for chunk in self.llm_responder.stream_reply(transcript):
+                        history_snapshot = list(self._conversation_history)
+                        pending_sentence = ""
+                        first_tts_pushed = False
+                        delta_count = 0
+                        async for chunk in self.llm_responder.stream_reply(transcript, history_snapshot):
                             full_reply += chunk
+                            pending_sentence += chunk
+                            delta_count += 1
+                            if delta_count == 1:
+                                _ts_log(logger, "AGENT_DELTA_FIRST", f"chunk_len={len(chunk)}")
                             await self.send_json({"type": "agent_delta", "text": chunk})
+                            # Detect sentence boundary: flush completed sentence to TTS
+                            parts = _SENT_BOUNDARY.split(pending_sentence)
+                            if len(parts) > 1:
+                                # All parts except the last are complete sentences
+                                for sentence in parts[:-1]:
+                                    sentence = sentence.strip()
+                                    if len(sentence) >= 10:
+                                        _ts_log(logger, "SENTENCE_BOUNDARY", f"len={len(sentence)}")
+                                        await self.tts_responder.push_sentence(reply_id, sentence)
+                                        first_tts_pushed = True
+                                pending_sentence = parts[-1]
+
+                            # Fallback for long first sentence without punctuation:
+                            # flush once we have enough words so audio can begin earlier.
+                            if not first_tts_pushed:
+                                early = pending_sentence.strip()
+                                if len(early) >= 60 and len(early.split()) >= 10:
+                                    _ts_log(logger, "EARLY_FLUSH_FALLBACK", f"len={len(early)}")
+                                    await self.tts_responder.push_sentence(reply_id, early)
+                                    pending_sentence = ""
+                                    first_tts_pushed = True
+
+                        # Flush any remaining text after the stream ends
+                        if pending_sentence.strip():
+                            await self.tts_responder.push_sentence(reply_id, pending_sentence.strip())
+
+                    # Signal no more sentences; drain task will finish and send tts_done
+                    await self.tts_responder.end_streaming_reply(reply_id)
+
                 except Exception:
                     logger.exception("LLM generation failed")
                     await self.tts_responder.stop_current_reply(reason="agent_error")
                     await self.send_json({"type": "agent_error", "msg": "LLM generation failed"})
                 else:
                     if full_reply.strip():
+                        _ts_log(logger, "AGENT_TEXT_FINAL", f"len={len(full_reply)}")
                         await self.send_json({"type": "agent_text", "text": full_reply.strip()})
-                        # Start TTS only after full response is generated (not partial)
-                        if reply_id is not None:
-                            await self.tts_responder.stream_reply(reply_id, full_reply.strip())
+                        # Append to history and cap length
+                        self._conversation_history.append({"role": "user", "content": transcript})
+                        self._conversation_history.append({"role": "assistant", "content": full_reply.strip()})
+                        max_msgs = self._MAX_HISTORY_TURNS * 2
+                        if len(self._conversation_history) > max_msgs:
+                            self._conversation_history = self._conversation_history[-max_msgs:]
                 finally:
                     await self.send_json({"type": "agent_done"})
                     self.pending_llm_requests.task_done()
@@ -236,7 +281,6 @@ class STTSession:
                     # Instead, just arm vote collection. Actual barge-in happens
                     # after confidence-gated speech is confirmed (in handle_result).
                     self.cancel_pending_finalize()
-                    self.cancel_turn_finalize()
                     if not self.user_speaking:
                         if not self.utterance_parts:
                             # Fresh speech — start vote accumulation
@@ -320,7 +364,6 @@ class STTSession:
         self.pending_speech_start = False
         self.speech_votes = 0
         self.cancel_pending_finalize()
-        self.cancel_turn_finalize()
         await self.tts_responder.close()
 
         if self.deepgram_ws is not None:
