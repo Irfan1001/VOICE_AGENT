@@ -1,6 +1,7 @@
 import argparse
 import difflib
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -12,7 +13,9 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
+
+
+logger = logging.getLogger("ist_voice_agent")
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -23,7 +26,7 @@ CHUNKS_PATH = DATA_DIR / "chunks.json"
 INDEX_PATH = DATA_DIR / "index.faiss"
 EMBED_MODEL = "text-embedding-3-small"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-USE_RERANKER_DEFAULT = os.getenv("RAG_USE_RERANKER", "true").lower() in {"1", "true", "yes", "on"}
+USE_RERANKER_DEFAULT = os.getenv("RAG_USE_RERANKER", "false").lower() in {"1", "true", "yes", "on"}
 MIN_CHUNK_CHARS = 80
 EMBED_BATCH_SIZE = 100
 client = None
@@ -52,6 +55,9 @@ def get_client():
 def get_cross_encoder():
 	global cross_encoder
 	if cross_encoder is None:
+		# Import lazily so environments with tight memory can run without loading torch stack.
+		from sentence_transformers import CrossEncoder
+
 		cross_encoder = CrossEncoder(RERANK_MODEL)
 	return cross_encoder
 
