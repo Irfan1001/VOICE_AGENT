@@ -6,3 +6,5 @@ numpy
 python-dotenv
 websockets
 cachetools
+rank-bm25
+sentence-transformers

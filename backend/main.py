@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import settings
 from backend.llm import LLMResponder
+from backend.rag import preload_models
 from backend.stt import STTSession
 
 logger = logging.getLogger("ist_voice_agent")
@@ -12,6 +13,15 @@ if not logger.handlers:
 
 app = FastAPI()
 llm_responder = LLMResponder(settings)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    try:
+        preload_models(preload_reranker=True)
+        logger.info("RAG models preloaded successfully")
+    except Exception as exc:
+        logger.warning("RAG model preload failed, continuing without warm cache: %s", exc)
 
 
 @app.get("/health")
