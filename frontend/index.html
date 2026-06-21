@@ -3,15 +3,20 @@
 <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<title>IST University STT Monitor</title>
+	<title>IST Voice Agent Console</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
 	<style>
 		:root {
-			--bg: #eef3eb;
-			--panel: rgba(255, 255, 255, 0.86);
-			--ink: #102417;
-			--muted: #5e6f63;
+			--bg-1: #ecf3ef;
+			--bg-2: #dbe9e2;
+			--panel: rgba(255, 255, 255, 0.82);
+			--ink: #13261d;
+			--muted: #5b6d62;
 			--brand: #0b6b3c;
-			--brand-dark: #084628;
+			--brand-dark: #064a2a;
+			--brand-soft: rgba(11, 107, 60, 0.12);
 			--danger: #a62d2d;
 			--line: rgba(16, 36, 23, 0.12);
 		}
@@ -23,10 +28,11 @@
 		body {
 			margin: 0;
 			min-height: 100vh;
-			font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+			font-family: "Manrope", "Segoe UI", sans-serif;
 			background:
-				radial-gradient(circle at top, rgba(11, 107, 60, 0.18), transparent 30%),
-				linear-gradient(160deg, #f6faf4 0%, #e7efe7 100%);
+				radial-gradient(circle at 8% 15%, rgba(11, 107, 60, 0.17), transparent 24%),
+				radial-gradient(circle at 92% 85%, rgba(18, 103, 139, 0.14), transparent 28%),
+				linear-gradient(155deg, var(--bg-1) 0%, var(--bg-2) 100%);
 			color: var(--ink);
 			display: flex;
 			align-items: center;
@@ -40,28 +46,50 @@
 			backdrop-filter: blur(14px);
 			border: 1px solid var(--line);
 			border-radius: 28px;
-			box-shadow: 0 22px 70px rgba(8, 70, 40, 0.12);
+			box-shadow: 0 28px 75px rgba(8, 70, 40, 0.15);
 			overflow: hidden;
+			animation: riseIn 420ms ease-out;
 		}
 
 		.hero {
 			padding: 28px 28px 18px;
-			background: linear-gradient(135deg, rgba(11, 107, 60, 0.96), rgba(5, 54, 32, 0.96));
+			background:
+				radial-gradient(circle at 82% 15%, rgba(140, 232, 189, 0.22), transparent 32%),
+				linear-gradient(135deg, rgba(11, 107, 60, 0.97), rgba(5, 54, 32, 0.98));
 			color: #f6fff8;
 		}
 
 		.hero h1 {
 			margin: 0;
+			font-family: "Space Grotesk", "Manrope", sans-serif;
 			font-size: clamp(1.8rem, 4vw, 2.6rem);
 			line-height: 1.05;
-			letter-spacing: 0.03em;
+			letter-spacing: 0.04em;
 			text-transform: uppercase;
 		}
 
 		.hero p {
-			margin: 10px 0 0;
+			margin: 12px 0 0;
 			max-width: 52ch;
 			color: rgba(246, 255, 248, 0.82);
+		}
+
+		.hero-badges {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+			margin-top: 12px;
+		}
+
+		.hero-badge {
+			font-size: 0.72rem;
+			font-weight: 700;
+			letter-spacing: 0.07em;
+			text-transform: uppercase;
+			border-radius: 999px;
+			padding: 7px 10px;
+			background: rgba(244, 255, 249, 0.16);
+			border: 1px solid rgba(244, 255, 249, 0.34);
 		}
 
 		.content {
@@ -75,6 +103,7 @@
 			border-radius: 20px;
 			padding: 18px;
 			background: rgba(255, 255, 255, 0.8);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 		}
 
 		.metrics {
@@ -106,8 +135,11 @@
 			border: 0;
 			border-radius: 999px;
 			padding: 14px 20px;
-			font-size: 0.98rem;
+			font-size: 0.95rem;
 			font-weight: 700;
+			font-family: "Space Grotesk", "Manrope", sans-serif;
+			letter-spacing: 0.03em;
+			text-transform: uppercase;
 			cursor: pointer;
 			transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
 		}
@@ -122,13 +154,13 @@
 		}
 
 		.call-btn {
-			background: var(--brand);
+			background: linear-gradient(135deg, var(--brand), var(--brand-dark));
 			color: white;
 			box-shadow: 0 12px 24px rgba(11, 107, 60, 0.22);
 		}
 
 		.end-btn {
-			background: #ffe9e9;
+			background: linear-gradient(135deg, #ffe9e9, #ffe0e0);
 			color: var(--danger);
 		}
 
@@ -170,7 +202,7 @@
 		}
 
 		.message.user {
-			background: #edf6ef;
+			background: #ecf8f1;
 			border: 1px solid rgba(11, 107, 60, 0.12);
 		}
 
@@ -182,8 +214,19 @@
 		}
 
 		.message.bot {
-			background: #fff8eb;
+			background: #fff7e8;
 			border: 1px solid rgba(163, 113, 18, 0.12);
+		}
+
+		@keyframes riseIn {
+			from {
+				opacity: 0;
+				transform: translateY(10px);
+			}
+			to {
+				opacity: 1;
+				transform: translateY(0);
+			}
 		}
 
 		.message small {
@@ -211,8 +254,12 @@
 <body>
 	<div class="shell">
 		<section class="hero">
-			<h1>IST UNIVERSITY VOICE AGENT</h1>
-
+			<h1>IST Voice Agent</h1>
+			<p>Institute of Space and Technology (IST) assistant console for admissions, programs, and campus information.</p>
+			<div class="hero-badges">
+				<span class="hero-badge">Institute of Space and Technology</span>
+				<span class="hero-badge">Live Transcript Monitor</span>
+			</div>
 		</section>
 
 		<section class="content">
